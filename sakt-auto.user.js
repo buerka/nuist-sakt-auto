@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.1.4
+// @version      1.2.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -523,12 +523,12 @@
         right: 16px;
         bottom: 16px;
         z-index: 99999;
-        width: 296px;
-        background: rgba(15, 23, 42, 0.97);
-        color: #f8fafc;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        border-radius: 12px;
-        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+        width: 292px;
+        background: #ffffff;
+        color: #111111;
+        border: 1px solid #111111;
+        border-radius: 2px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.1);
         font: 12.5px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
         overflow: hidden;
       }
@@ -536,39 +536,50 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 8px 12px;
-        background: linear-gradient(90deg, #1e3a8a, #1d4ed8);
-        font-weight: 600;
-        font-size: 13px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #111111;
+      }
+      #sakt-panel .sakt-title b {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+      }
+      #sakt-panel .sakt-title i {
+        margin-left: 6px;
+        font-style: normal;
+        font-size: 11px;
+        color: #999999;
       }
       #sakt-panel .sakt-dot {
-        font-size: 12px;
-        color: #94a3b8;
+        font-size: 9px;
+        color: #d4d4d4;
       }
       #sakt-panel .sakt-tabs {
         display: flex;
-        gap: 4px;
-        padding: 8px 10px 0;
+        border-bottom: 1px solid #e8e8e8;
       }
       #sakt-panel .sakt-tab {
         flex: 1;
-        cursor: pointer;
+        margin-bottom: -1px;
+        padding: 8px 0;
         border: 0;
-        border-radius: 6px 6px 0 0;
-        padding: 6px 0;
-        background: #1e293b;
-        color: #cbd5e1;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: #999999;
         font-size: 12px;
-        font-weight: 500;
+        cursor: pointer;
+      }
+      #sakt-panel .sakt-tab:hover {
+        color: #111111;
       }
       #sakt-panel .sakt-tab.active {
-        background: #2563eb;
-        color: #ffffff;
-        font-weight: 700;
+        color: #111111;
+        border-bottom-color: #111111;
+        font-weight: 600;
       }
       #sakt-panel .sakt-page {
         display: none;
-        padding: 10px 12px 12px;
+        padding: 12px;
       }
       #sakt-panel .sakt-page.active {
         display: block;
@@ -577,94 +588,105 @@
         display: flex;
         justify-content: space-between;
         gap: 8px;
-        margin-bottom: 4px;
+        margin-bottom: 5px;
       }
       #sakt-panel .sakt-muted {
-        color: #94a3b8;
         flex: none;
+        color: #999999;
       }
       #sakt-panel .sakt-value {
-        color: #e2e8f0;
+        color: #111111;
         text-align: right;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      #sakt-panel .sakt-bar {
+        height: 2px;
+        margin: 8px 0 2px;
+        background: #eeeeee;
+        overflow: hidden;
+      }
+      #sakt-panel .sakt-bar-inner {
+        width: 0;
+        height: 100%;
+        background: #111111;
+        transition: width 0.4s linear;
+      }
       #sakt-panel .sakt-actions {
         display: flex;
-        gap: 6px;
-        margin-top: 10px;
+        gap: 8px;
+        margin-top: 12px;
       }
       #sakt-panel .sakt-btn {
         flex: 1;
-        cursor: pointer;
-        border: 0;
-        border-radius: 6px;
         padding: 7px 0;
+        border-radius: 2px;
         font-size: 12px;
         font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+      }
+      #sakt-panel .sakt-btn.solid {
+        border: 1px solid #111111;
+        background: #111111;
         color: #ffffff;
       }
-      #sakt-panel .sakt-btn.primary {
-        background: #2563eb;
+      #sakt-panel .sakt-btn.solid:hover {
+        background: #000000;
       }
-      #sakt-panel .sakt-btn.primary:hover {
-        background: #1d4ed8;
+      #sakt-panel .sakt-btn.ghost {
+        border: 1px solid #111111;
+        background: #ffffff;
+        color: #111111;
       }
-      #sakt-panel .sakt-btn.warn {
-        background: #d97706;
-      }
-      #sakt-panel .sakt-btn.warn:hover {
-        background: #b45309;
-      }
-      #sakt-panel .sakt-btn.danger {
-        background: #dc2626;
-      }
-      #sakt-panel .sakt-btn.danger:hover {
-        background: #b91c1c;
-      }
-      #sakt-panel .sakt-btn.success {
-        background: #16a34a;
-      }
-      #sakt-panel .sakt-btn.success:hover {
-        background: #15803d;
+      #sakt-panel .sakt-btn.ghost:hover {
+        background: #111111;
+        color: #ffffff;
       }
       #sakt-panel .sakt-field {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        margin: 8px 0;
-        color: #e2e8f0;
+        margin: 9px 0;
+        color: #111111;
       }
       #sakt-panel .sakt-field input[type="number"],
       #sakt-panel .sakt-field input[type="text"],
       #sakt-panel .sakt-field input[type="password"],
       #sakt-panel .sakt-field select {
         width: 158px;
-        background: #0b1220;
-        color: #f8fafc;
-        border: 1px solid #334155;
-        border-radius: 6px;
         padding: 4px 6px;
+        border: 1px solid #d4d4d4;
+        border-radius: 2px;
+        background: #ffffff;
+        color: #111111;
         font-size: 12px;
+        outline: none;
+      }
+      #sakt-panel .sakt-field input[type="number"]:focus,
+      #sakt-panel .sakt-field input[type="text"]:focus,
+      #sakt-panel .sakt-field input[type="password"]:focus,
+      #sakt-panel .sakt-field select:focus {
+        border-color: #111111;
       }
       #sakt-panel .sakt-field input[type="checkbox"] {
-        width: 16px;
-        height: 16px;
-        accent-color: #2563eb;
+        width: 14px;
+        height: 14px;
+        accent-color: #111111;
       }
       #sakt-panel .sakt-hint {
-        color: #94a3b8;
-        font-size: 11px;
         margin-top: 8px;
-        line-height: 1.5;
+        color: #999999;
+        font-size: 11px;
+        line-height: 1.6;
       }
       #sakt-panel .sakt-status {
         margin-top: 8px;
-        color: #93c5fd;
-        font-size: 11.5px;
         min-height: 16px;
+        color: #555555;
+        font-size: 11.5px;
         word-break: break-all;
       }
     `;
@@ -677,7 +699,7 @@
     root.id = 'sakt-panel';
     root.innerHTML = `
       <div class="sakt-head">
-        <span>SAKT 自动学习</span>
+        <span class="sakt-title"><b>SAKT</b><i>自动学习</i></span>
         <span class="sakt-dot" id="sakt-dot">●</span>
       </div>
       <div class="sakt-tabs">
@@ -689,6 +711,7 @@
         <div class="sakt-row"><span class="sakt-muted">剩余</span><span class="sakt-value" id="sakt-left">-</span></div>
         <div class="sakt-row"><span class="sakt-muted">本节</span><span class="sakt-value" id="sakt-cur">-</span></div>
         <div class="sakt-row"><span class="sakt-muted">进度</span><span class="sakt-value" id="sakt-prog">-</span></div>
+        <div class="sakt-bar"><div class="sakt-bar-inner" id="sakt-bar"></div></div>
         <div class="sakt-actions" id="sakt-actions"></div>
         <div class="sakt-status" id="sakt-status"></div>
       </div>
@@ -706,7 +729,7 @@
           </select>
         </label>
         <div class="sakt-actions">
-          <button class="sakt-btn success" id="sakt-save-cfg">保存设置</button>
+          <button class="sakt-btn solid" id="sakt-save-cfg">保存设置</button>
         </div>
         <div class="sakt-hint">保存后立即生效。倍速建议 1~2；自动答题不校验对错，答错会计入平台「答错」计数。</div>
       </div>
@@ -717,8 +740,8 @@
         <label class="sakt-field"><span>模型</span><input type="text" id="sakt-model" placeholder="deepseek-chat"></label>
         <label class="sakt-field"><span>超时(ms)</span><input type="number" id="sakt-timeout" min="3000" max="120000" step="1000"></label>
         <div class="sakt-actions">
-          <button class="sakt-btn primary" id="sakt-test-ai">测试连接</button>
-          <button class="sakt-btn success" id="sakt-save-ai">保存</button>
+          <button class="sakt-btn ghost" id="sakt-test-ai">测试连接</button>
+          <button class="sakt-btn solid" id="sakt-save-ai">保存</button>
         </div>
         <div class="sakt-status" id="sakt-ai-status"></div>
         <div class="sakt-hint">OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等均可）。Key 只存在本机 localStorage。AI 答错同样会计入平台答题记录。</div>
@@ -731,6 +754,7 @@
     el.left = $('#sakt-left', root);
     el.cur = $('#sakt-cur', root);
     el.prog = $('#sakt-prog', root);
+    el.bar = $('#sakt-bar', root);
     el.actions = $('#sakt-actions', root);
     el.status = $('#sakt-status', root);
     el.aiStatus = $('#sakt-ai-status', root);
@@ -843,14 +867,14 @@
     if (!el.actions) return;
     if (timer) {
       el.actions.innerHTML = `
-        <button class="sakt-btn warn" id="sakt-pause">暂停</button>
-        <button class="sakt-btn danger" id="sakt-stop">停止</button>
+        <button class="sakt-btn ghost" id="sakt-pause">暂停</button>
+        <button class="sakt-btn solid" id="sakt-stop">停止</button>
       `;
       $('#sakt-pause', el.actions).addEventListener('click', togglePause);
       $('#sakt-stop', el.actions).addEventListener('click', stop);
     } else {
       el.actions.innerHTML = `
-        <button class="sakt-btn primary" id="sakt-start">开始自动学习</button>
+        <button class="sakt-btn solid" id="sakt-start">开始自动学习</button>
       `;
       $('#sakt-start', el.actions).addEventListener('click', start);
     }
@@ -868,10 +892,12 @@
       const d = Math.floor(video.duration || 0);
       const playState = video.paused ? '暂停' : '播放中';
       el.prog.textContent = `${t}s / ${d}s · ${CFG.rate}x · ${playState}`;
+      if (el.bar) el.bar.style.width = (d > 0 ? Math.min(100, (t / d) * 100) : 0) + '%';
     } else {
       el.prog.textContent = '-';
+      if (el.bar) el.bar.style.width = '0%';
     }
-    el.dot.style.color = timer ? '#22c55e' : '#94a3b8';
+    el.dot.style.color = timer ? '#111111' : '#d4d4d4';
   }
 
   // ---------------- 启动 ----------------
