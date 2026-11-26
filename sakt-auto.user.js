@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.2.0
+// @version      1.2.2
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -332,7 +332,27 @@
   }
 
   // ---------------- 切换课时 ----------------
+  async function waitForLesson(timeout) {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const name = pageLessonName();
+      if (name) return name;
+      await sleep(250);
+    }
+    return '';
+  }
+
+  async function waitForTree(timeout) {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      if (document.querySelector('.ant-tree-node-content-wrapper')) return true;
+      await sleep(250);
+    }
+    return false;
+  }
+
   async function clickLessonByName(name) {
+    await waitForTree(4000);
     for (let i = 0; i < 3; i++) {
       const closed = [...document.querySelectorAll('.ant-tree-switcher_close')];
       if (!closed.length) break;
@@ -364,7 +384,17 @@
       } catch (e) { /* ignore */ }
     }
 
-    location.href = `/students/courseDetail?graphId=${curGraph()}&id=${item.id}`;
+    const target = `/students/courseDetail?graphId=${curGraph()}&id=${item.id}`;
+    if (location.pathname + location.search === target) return false;
+    try {
+      const last = JSON.parse(sessionStorage.getItem('sakt.navGuard') || 'null');
+      if (last && last.url === target && Date.now() - last.t < 10000) {
+        console.log('[SAKT] 跳过重复跳转:', target);
+        return false;
+      }
+      sessionStorage.setItem('sakt.navGuard', JSON.stringify({ url: target, t: Date.now() }));
+    } catch (e) { /* ignore */ }
+    location.href = target;
     return true;
   }
 
@@ -454,6 +484,8 @@
   }
 
   async function start() {
+    if (state.starting) return;
+    state.starting = true;
     try {
       const q = await ensureQueue();
       if (!q.items.length) {
@@ -461,12 +493,17 @@
         return;
       }
 
-      const current = clean(pageLessonName());
-      const inQueue = q.items.some(x => clean(x.name) === current);
-      if (!inQueue) {
-        setStatus('当前课时已学完，跳转到：' + clean(q.items[0].name));
-        await goToLesson(q.items[0]);
-        await sleep(1500);
+      const currentName = await waitForLesson(8000);
+      const current = clean(currentName);
+      if (current) {
+        const inQueue = q.items.some(x => clean(x.name) === current);
+        if (!inQueue) {
+          setStatus('当前课时已学完，跳转到：' + clean(q.items[0].name));
+          await goToLesson(q.items[0]);
+          await sleep(1500);
+        }
+      } else {
+        setStatus('课程信息加载中，先播放当前视频');
       }
 
       localStorage.setItem(AUTO, '1');
@@ -480,6 +517,8 @@
       console.log(`[SAKT] 启动：剩余 ${q.items.length} 节，倍速 ${CFG.rate}x`);
     } catch (e) {
       setStatus('启动失败：' + e.message);
+    } finally {
+      state.starting = false;
     }
   }
 
@@ -510,7 +549,7 @@
   }
 
   // ---------------- 面板 ----------------
-  const state = { running: false, tab: 'run', status: '' };
+  const state = { running: false, starting: false, tab: 'run', status: '' };
   const el = {};
 
   function injectCSS() {
@@ -901,6 +940,19 @@
   }
 
   // ---------------- 启动 ----------------
+  function autoGuard() {
+    const now = Date.now();
+    let g = { t: now, n: 1 };
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('sakt.autoGuard') || 'null');
+      if (saved && now - saved.t < 60000) {
+        g = { t: saved.t, n: saved.n + 1 };
+      }
+    } catch (e) { /* ignore */ }
+    sessionStorage.setItem('sakt.autoGuard', JSON.stringify(g));
+    return g.n;
+  }
+
   W.__saktStart = start;
   W.__saktStop = stop;
 
@@ -914,8 +966,14 @@
       const q = await ensureQueue();
       if (!q.items.length) setStatus('没有未学课时');
       if (localStorage.getItem(AUTO) === '1' && q.items.length) {
-        console.log('[SAKT] 检测到未完成队列，自动继续');
-        await start();
+        const loads = autoGuard();
+        if (loads <= 3) {
+          console.log('[SAKT] 检测到未完成队列，自动继续');
+          await start();
+        } else {
+          setStatus('检测到页面反复刷新，已暂停自动启动，请点「开始」');
+          console.warn('[SAKT] 60 秒内整页加载超过 3 次，已停止自动启动');
+        }
       }
     } catch (e) {
       setStatus('课程目录读取失败：' + e.message);
