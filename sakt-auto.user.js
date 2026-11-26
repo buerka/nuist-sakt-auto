@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.1.3
+// @version      1.1.4
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -26,6 +26,7 @@
  *   - 弹窗习题默认选 A；开启 AI 后可调用 OpenAI 兼容接口作答
  *   - AI Key 只保存在本机 localStorage，不会发送给平台
  */
+/* global unsafeWindow, GM_xmlhttpRequest */
 (() => {
   'use strict';
 
@@ -93,7 +94,7 @@
     try {
       const q = JSON.parse(localStorage.getItem(QKEY) || 'null');
       if (q && q.graphId === curGraph() && Array.isArray(q.items)) return q;
-    } catch (e) {}
+    } catch (e) { /* ignore */ }
     return null;
   }
 
@@ -194,7 +195,7 @@
       const keys = Object.keys(all);
       if (keys.length > 300) delete all[keys[0]];
       localStorage.setItem(AICACHE, JSON.stringify(all));
-    } catch (e) {}
+    } catch (e) { /* ignore */ }
   }
 
   async function aiAnswer(q) {
@@ -271,7 +272,7 @@
       const log = JSON.parse(localStorage.getItem(QLOG) || '[]');
       log.push(entry);
       localStorage.setItem(QLOG, JSON.stringify(log.slice(-500)));
-    } catch (e) {}
+    } catch (e) { /* ignore */ }
   }
 
   let answering = false;
@@ -360,7 +361,7 @@
         await sleep(400);
         await router.push({ path: '/students/courseDetail', query: { graphId: curGraph(), id: item.id } });
         return true;
-      } catch (e) {}
+      } catch (e) { /* ignore */ }
     }
 
     location.href = `/students/courseDetail?graphId=${curGraph()}&id=${item.id}`;
