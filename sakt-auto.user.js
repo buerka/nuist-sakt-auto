@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.3.1
+// @version      1.3.2
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -282,6 +282,9 @@
     };
 
     const resp = await aiRequest(payload);
+    if (resp && resp.error) {
+      throw new Error(resp.error.message || JSON.stringify(resp.error).slice(0, 80));
+    }
     const content = resp && resp.choices && resp.choices[0] && resp.choices[0].message
       ? resp.choices[0].message.content
       : '';
@@ -966,12 +969,16 @@
         max_tokens: 4,
         messages: [{ role: 'user', content: '只输出数字 1' }]
       });
-      const content = resp && resp.choices && resp.choices[0] && resp.choices[0].message
-        ? resp.choices[0].message.content
-        : JSON.stringify(resp).slice(0, 60);
-      setAiStatus(`连接成功（${Date.now() - started}ms）：${String(content).slice(0, 40)}`);
+      if (resp && resp.error) {
+        throw new Error(resp.error.message || JSON.stringify(resp.error).slice(0, 80));
+      }
+      const message = resp && resp.choices && resp.choices[0] && resp.choices[0].message;
+      if (!message) throw new Error('返回结构异常：' + JSON.stringify(resp).slice(0, 80));
+      const text = String(message.content || '').trim();
+      const usage = resp.usage && resp.usage.total_tokens ? `，${resp.usage.total_tokens} tokens` : '';
+      setAiStatus(`模型已回复（${Date.now() - started}ms${usage}）：「${text || '(空)'}」`);
     } catch (e) {
-      setAiStatus('连接失败：' + e.message);
+      setAiStatus('失败：' + e.message);
     }
   }
 
