@@ -1,10 +1,24 @@
-# sakt-auto · 实验室安全准入与教育平台自动学习脚本
+# sakt-auto · 南信大（NUIST）实验室安全准入平台自动学习脚本
 
-> 一个 Tampermonkey 油猴脚本：自动逐节播放「未学」课时，处理视频弹窗习题，播完自动进入下一节。
+> 南京信息工程大学（NUIST）「实验室安全准入与教育平台」（https://sakt.nuist.edu.cn）的 Tampermonkey 油猴脚本：
+> 自动逐节播放「未学」课时，处理视频弹窗习题，播完自动进入下一节。
 > 视频真实播放，完成记录由平台自身接口写入；脚本不伪造进度。
 
 ![Tampermonkey](https://img.shields.io/badge/Tampermonkey-userscript-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+![NUIST](https://img.shields.io/badge/NUIST-%E5%8D%97%E4%BF%A1%E5%A4%A7-blue)
+
+## 适用平台
+
+| 项 | 信息 |
+|---|---|
+| 学校 | 南京信息工程大学（Nanjing University of Information Science & Technology，NUIST / 南信大） |
+| 平台 | 实验室安全准入与教育平台 |
+| 地址 | https://sakt.nuist.edu.cn |
+| 技术支持 | 南京市杰畅教育科技有限公司 |
+| 适用页面 | `/students/courseDetail?id=...` 课程学习页 |
+
+该平台是南信大实验室与设备管理处使用的在线安全准入培训系统，学生需逐节看完视频并通过考试才能获得实验室准入资格。本脚本只解决「逐节连续播放」这件重复劳动。
 
 ## 功能
 

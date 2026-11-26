@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         南信大实验室安全平台 · 自动连续学习
-// @namespace    local.sakt.auto
-// @version      1.0.0
-// @description  自动逐节播放「未学」课时：防挂机续播、自动处理弹窗习题、播完自动进入下一节。仅用于本人已登录的课程页面。
+// @name         南信大（NUIST）实验室安全平台 · 自动连续学习
+// @namespace    https://github.com/buerka/sakt-auto
+// @version      1.0.1
+// @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放「未学」课时，防挂机续播、自动处理弹窗习题、播完自动进入下一节。仅用于本人已登录的课程页面。
 // @author       buerka
 // @license      MIT
 // @match        https://sakt.nuist.edu.cn/students/courseDetail*
