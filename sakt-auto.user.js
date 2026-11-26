@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.1.2
+// @version      1.1.3
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -310,6 +310,7 @@
       }
 
       chooseOptions(m, letters);
+      await sleep(200);
       const btn = [...m.querySelectorAll('button')].find(b => (b.innerText || '').replace(/\s+/g, '').includes('提交'));
       if (btn && !btn.disabled) btn.click();
 
@@ -384,13 +385,12 @@
     return true;
   }
 
-  async function tryPlay() {
+  function tryPlay() {
     if (!video || resuming || !video.paused || video.ended) return;
     resuming = true;
-    try {
-      await video.play();
-    } catch (e) {}
-    resuming = false;
+    Promise.resolve(video.play()).catch(() => {}).finally(() => {
+      resuming = false;
+    });
   }
 
   let timer = null;
@@ -405,7 +405,7 @@
       return;
     }
 
-    if (video.paused && !video.ended) await tryPlay();
+    if (video.paused && !video.ended) tryPlay();
     if (video.playbackRate !== Number(CFG.rate)) video.playbackRate = Number(CFG.rate);
 
     if (video.ended && !endedHandled) {
@@ -472,7 +472,7 @@
       state.running = true;
       W.__saktRunning = true;
       ensureVideo();
-      await tryPlay();
+      tryPlay();
       startLoop();
       renderStatus();
       setStatus(`启动：剩余 ${q.items.length} 节，倍速 ${CFG.rate}x`);
