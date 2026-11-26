@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.2.2
+// @version      1.3.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -172,10 +172,72 @@
       .finally(() => clearTimeout(timer));
   }
 
-  function parseLetters(text) {
-    const found = String(text || '').toUpperCase().match(/[A-D]/g);
-    if (!found) return [];
-    return [...new Set(found)];
+  function parseAiAnswer(text, q) {
+    const raw = String(text || '').trim();
+    if (!raw) return [];
+    const valid = new Set(q.options.map(o => o.letter));
+    const dedupe = arr => [...new Set(arr)].filter(l => valid.has(l));
+
+    // 1) JSON 输出：{"answer":"A"} / {"答案":"AC"}
+    const jsonText = raw.match(/\{[\s\S]*\}/);
+    if (jsonText) {
+      try {
+        const obj = JSON.parse(jsonText[0]);
+        const value = obj.answer != null ? obj.answer : obj.result != null ? obj.result : obj['答案'];
+        if (value != null) {
+          const letters = dedupe(String(value).toUpperCase().match(/[A-D]/g) || []);
+          if (letters.length) return letters;
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    // 2) 显式答案前缀：答案/选项/应选/选择/answer 后面出现的独立字母串
+    const prefix = raw.match(/(?:答案|选项|应选|选择|选|answer|choose)/i);
+    if (prefix) {
+      const start = prefix.index + prefix[0].length;
+      const after = raw.slice(start, start + 48).replace(/\b(?:and|or)\b/gi, ' ');
+      const run = after.match(/(?<![A-Za-z])([A-Da-d](?:[\s,，、;；和及/]*[A-Da-d])*)(?![A-Za-z])/);
+      if (run) {
+        const letters = dedupe(run[1].toUpperCase().match(/[A-D]/g) || []);
+        if (letters.length) return letters;
+      }
+    }
+
+    // 3) 整段只由字母和分隔符组成：A / AB / A,C / A、C
+    if (/^[A-Da-d\s,，、;；和及]+$/.test(raw)) {
+      const letters = dedupe(raw.toUpperCase().match(/[A-D]/g) || []);
+      if (letters.length) return letters;
+    }
+
+    // 4) 判断题：正确 / 错误（含 不正确、√、× 等）
+    const isJudge = q.options.length === 2
+      && q.options.some(o => /正确/.test(o.text))
+      && q.options.some(o => /错误/.test(o.text));
+    if (isJudge) {
+      const neg = /错误|不正确|不对|错的|×|✗/.test(raw);
+      const pos = /正确|对的|√|✓/.test(raw);
+      if (neg) {
+        const hit = q.options.find(o => /错误|错|不正确/.test(o.text));
+        if (hit) return [hit.letter];
+      }
+      if (pos && !neg) {
+        const hit = q.options.find(o => /正确|对/.test(o.text));
+        if (hit) return [hit.letter];
+      }
+    }
+
+    // 5) 回显了选项文本：直接按文本匹配
+    const byText = q.options
+      .filter(o => o.text && o.text.length >= 2 && raw.includes(o.text))
+      .map(o => o.letter);
+    if (byText.length) return dedupe(byText);
+
+    // 6) 兜底：独立字母（用词边界排除 BECAUSE 这类单词里的 A/C）
+    const singles = raw.toUpperCase().match(/(?<![A-Z])[A-D](?![A-Z])/g) || [];
+    const letters = dedupe(singles);
+    if (letters.length && letters.length <= 2) return letters;
+
+    return [];
   }
 
   function readAiCache(stem) {
@@ -200,21 +262,21 @@
 
   async function aiAnswer(q) {
     const cached = readAiCache(q.stem);
-    if (cached) return cached;
+    if (cached) return { letters: cached, raw: '(缓存)' };
 
     const options = q.options.map(o => o.letter + '. ' + o.text).join('\n');
     const payload = {
       model: CFG.aiModel,
       temperature: 0,
-      max_tokens: 16,
+      max_tokens: 32,
       messages: [
         {
           role: 'system',
-          content: '你是实验室安全考试助手。只输出选项字母，不要解释。多选题输出多个字母，例如 AC。'
+          content: '你是实验室安全考试助手。只输出 JSON，不要解释。格式：{"answer":"A"}；多选题输出多个字母，例如 {"answer":"AC"}。'
         },
         {
           role: 'user',
-          content: `题型：${q.kindText}\n题目：${q.stem}\n选项：\n${options}\n请只回答字母：`
+          content: `题型：${q.kindText}\n题目：${q.stem}\n选项：\n${options}\n请按 JSON 格式输出答案：`
         }
       ]
     };
@@ -225,10 +287,10 @@
       : '';
     if (!content) throw new Error('AI 返回为空');
 
-    const letters = parseLetters(content).filter(l => q.options.some(o => o.letter === l));
+    const letters = parseAiAnswer(content, q);
     if (!letters.length) throw new Error('无法解析选项：' + String(content).slice(0, 40));
     writeAiCache(q.stem, letters);
-    return letters;
+    return { letters, raw: String(content) };
   }
 
   // ---------------- 弹窗习题 ----------------
@@ -294,11 +356,15 @@
       let letters = [];
       let source = 'default';
       let aiError = '';
+      let aiRaw = '';
 
       if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
         try {
-          letters = await aiAnswer(q);
+          const result = await aiAnswer(q);
+          letters = result.letters;
+          aiRaw = result.raw;
           source = 'ai';
+          setAiStatus(`AI 返回「${aiRaw.replace(/\s+/g, ' ').slice(0, 40)}」→ ${letters.join('')}`);
         } catch (e) {
           aiError = e.message;
           setAiStatus('AI 失败：' + e.message + '，改用默认选项');
@@ -321,7 +387,8 @@
         stem: q.stem,
         picked: letters,
         source,
-        aiError
+        aiError,
+        aiRaw: aiRaw.slice(0, 200)
       });
 
       setStatus(`已作答：${letters.join('')}（${source === 'ai' ? 'AI' : '默认'}）`);
@@ -955,6 +1022,7 @@
 
   W.__saktStart = start;
   W.__saktStop = stop;
+  W.__saktParse = parseAiAnswer;
 
   (async () => {
     buildPanel();
