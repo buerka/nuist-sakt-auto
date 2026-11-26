@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.1.1
+// @version      1.1.2
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -127,6 +127,13 @@
     return [...document.querySelectorAll('.ant-modal-wrap')].find(m => getComputedStyle(m).display !== 'none');
   }
 
+  function closeModal() {
+    const modal = visibleModal();
+    if (!modal) return;
+    const btn = modal.querySelector('.ant-modal-close');
+    if (btn) btn.click();
+  }
+
   // ---------------- AI 接口 ----------------
   function aiRequest(payload) {
     const base = String(CFG.aiBaseUrl || '').replace(/\/+$/, '');
@@ -244,14 +251,18 @@
     return { kindText, stem, options };
   }
 
+  function isChecked(node) {
+    return /-checked/.test(node.className) || !!node.querySelector('.ant-checkbox-checked, .ant-radio-checked');
+  }
+
   function chooseOptions(m, letters) {
     const wanted = new Set(letters);
-    m.querySelectorAll('.ant-radio-wrapper, .ant-checkbox-wrapper').forEach(node => {
+    m.querySelectorAll('.ant-radio-wrapper, .ant-checkbox-wrapper').forEach((node, index) => {
       const letterEl = node.querySelector('.letter');
       const letter = letterEl
         ? (letterEl.innerText || '').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1)
-        : '';
-      if (wanted.has(letter) && !/-checked/.test(node.className)) node.click();
+        : ('ABCD'[index] || '');
+      if (wanted.has(letter) && !isChecked(node)) node.click();
     });
   }
 
@@ -337,6 +348,7 @@
   }
 
   async function goToLesson(item) {
+    closeModal();
     if (await clickLessonByName(item.name)) return true;
 
     const app = W.document ? W.document.querySelector('#app') : null;
