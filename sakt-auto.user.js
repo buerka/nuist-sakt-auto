@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.1.0
+// @version      1.1.1
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -447,6 +447,15 @@
         setStatus('没有未学课时');
         return;
       }
+
+      const current = clean(pageLessonName());
+      const inQueue = q.items.some(x => clean(x.name) === current);
+      if (!inQueue) {
+        setStatus('当前课时已学完，跳转到：' + clean(q.items[0].name));
+        await goToLesson(q.items[0]);
+        await sleep(1500);
+      }
+
       localStorage.setItem(AUTO, '1');
       state.running = true;
       W.__saktRunning = true;
