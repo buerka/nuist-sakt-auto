@@ -1,16 +1,16 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
-// @namespace    https://github.com/buerka/sakt-auto
-// @version      1.0.1
+// @namespace    https://github.com/buerka/nuist-sakt-auto
+// @version      1.0.2
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放「未学」课时，防挂机续播、自动处理弹窗习题、播完自动进入下一节。仅用于本人已登录的课程页面。
 // @author       buerka
 // @license      MIT
 // @match        https://sakt.nuist.edu.cn/students/courseDetail*
 // @run-at       document-idle
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/buerka/sakt-auto/main/sakt-auto.user.js
-// @downloadURL  https://raw.githubusercontent.com/buerka/sakt-auto/main/sakt-auto.user.js
-// @supportURL   https://github.com/buerka/sakt-auto/issues
+// @updateURL    https://raw.githubusercontent.com/buerka/nuist-sakt-auto/main/sakt-auto.user.js
+// @downloadURL  https://raw.githubusercontent.com/buerka/nuist-sakt-auto/main/sakt-auto.user.js
+// @supportURL   https://github.com/buerka/nuist-sakt-auto/issues
 // ==/UserScript==
 
 /**

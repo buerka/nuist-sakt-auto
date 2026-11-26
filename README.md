@@ -1,4 +1,4 @@
-# sakt-auto · 南信大（NUIST）实验室安全准入平台自动学习脚本
+# nuist-sakt-auto · 南信大（NUIST）实验室安全准入平台自动学习脚本
 
 > 南京信息工程大学（NUIST）「实验室安全准入与教育平台」（https://sakt.nuist.edu.cn）的 Tampermonkey 油猴脚本：
 > 自动逐节播放「未学」课时，处理视频弹窗习题，播完自动进入下一节。
@@ -50,7 +50,7 @@
 2. 打开安装链接（Tampermonkey 会自动弹安装页）：
 
    ```
-   https://raw.githubusercontent.com/buerka/sakt-auto/main/sakt-auto.user.js
+   https://raw.githubusercontent.com/buerka/nuist-sakt-auto/main/sakt-auto.user.js
    ```
 
    或在 Tampermonkey 面板「新建脚本」，粘贴 `sakt-auto.user.js` 全部内容保存。
