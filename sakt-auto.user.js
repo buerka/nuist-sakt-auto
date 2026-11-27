@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.3.2
+// @version      1.4.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -43,7 +43,10 @@
     aiBaseUrl: '',
     aiKey: '',
     aiModel: '',
-    aiTimeout: 20000
+    aiTimeout: 30000,
+    aiMaxTokens: 1024,
+    aiVotes: 3,
+    aiExtra: ''
   };
 
   const CFG_KEY = 'sakt.config';
@@ -172,27 +175,45 @@
       .finally(() => clearTimeout(timer));
   }
 
+  function isPlainObject(v) {
+    return !!v && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  function aiExtraParams() {
+    const raw = String(CFG.aiExtra || '').trim();
+    if (!raw) return {};
+    try {
+      const obj = JSON.parse(raw);
+      return isPlainObject(obj) ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
   function parseAiAnswer(text, q) {
     const raw = String(text || '').trim();
     if (!raw) return [];
     const valid = new Set(q.options.map(o => o.letter));
     const dedupe = arr => [...new Set(arr)].filter(l => valid.has(l));
 
-    // 1) JSON 输出：{"answer":"A"} / {"答案":"AC"}
-    const jsonText = raw.match(/\{[\s\S]*\}/);
-    if (jsonText) {
+    // 1) JSON 输出：模型可能先分析再给答案，所以从后往前找最后一个合法 JSON
+    const candidates = raw.match(/\{[\s\S]{0,500}?\}/g) || [];
+    for (let i = candidates.length - 1; i >= 0; i--) {
       try {
-        const obj = JSON.parse(jsonText[0]);
+        const obj = JSON.parse(candidates[i]);
+        if (!isPlainObject(obj)) continue;
         const value = obj.answer != null ? obj.answer : obj.result != null ? obj.result : obj['答案'];
-        if (value != null) {
-          const letters = dedupe(String(value).toUpperCase().match(/[A-D]/g) || []);
-          if (letters.length) return letters;
-        }
-      } catch (e) { /* ignore */ }
+        if (value == null) continue;
+        const letters = dedupe(String(value).toUpperCase().match(/[A-D]/g) || []);
+        if (letters.length) return letters;
+      } catch (e) { /* 不是 JSON，继续往前找 */ }
     }
 
-    // 2) 显式答案前缀：答案/选项/应选/选择/answer 后面出现的独立字母串
-    const prefix = raw.match(/(?:答案|选项|应选|选择|选|answer|choose)/i);
+    // 2) 显式答案前缀：取最后一次出现的「答案/选项/应选/选择/answer」后面的独立字母串
+    const prefixRe = /(?:答案|选项|应选|选择|answer|choose)/gi;
+    let prefix = null;
+    let hit;
+    while ((hit = prefixRe.exec(raw))) prefix = hit;
     if (prefix) {
       const start = prefix.index + prefix[0].length;
       const after = raw.slice(start, start + 48).replace(/\b(?:and|or)\b/gi, ' ');
@@ -240,60 +261,134 @@
     return [];
   }
 
-  function readAiCache(stem) {
+  function cacheKey(q) {
+    // 题干 + 选项文本一起做 key：选项顺序/内容变了就重新问，避免旧答案套到新题上
+    return q.stem + '||' + q.options.map(o => o.text).join('||');
+  }
+
+  function readAiCache(key) {
     try {
       const all = JSON.parse(localStorage.getItem(AICACHE) || '{}');
-      const hit = all[stem];
-      return hit && Array.isArray(hit.letters) ? hit.letters : null;
+      const hit = all[key];
+      if (hit && Array.isArray(hit.letters) && hit.letters.length) {
+        return { letters: hit.letters, votes: hit.votes || '缓存' };
+      }
+      return null;
     } catch (e) {
       return null;
     }
   }
 
-  function writeAiCache(stem, letters) {
+  function writeAiCache(key, letters, votes) {
     try {
       const all = JSON.parse(localStorage.getItem(AICACHE) || '{}');
-      all[stem] = { letters, t: Date.now() };
+      all[key] = { letters, votes, t: Date.now() };
       const keys = Object.keys(all);
       if (keys.length > 300) delete all[keys[0]];
       localStorage.setItem(AICACHE, JSON.stringify(all));
     } catch (e) { /* ignore */ }
   }
 
-  async function aiAnswer(q) {
-    const cached = readAiCache(q.stem);
-    if (cached) return { letters: cached, raw: '(缓存)' };
-
+  function buildQuizMessages(q) {
     const options = q.options.map(o => o.letter + '. ' + o.text).join('\n');
-    const payload = {
-      model: CFG.aiModel,
-      temperature: 0,
-      max_tokens: 32,
-      messages: [
-        {
-          role: 'system',
-          content: '你是实验室安全考试助手。只输出 JSON，不要解释。格式：{"answer":"A"}；多选题输出多个字母，例如 {"answer":"AC"}。'
-        },
-        {
-          role: 'user',
-          content: `题型：${q.kindText}\n题目：${q.stem}\n选项：\n${options}\n请按 JSON 格式输出答案：`
-        }
-      ]
-    };
+    const lesson = pageLessonName();
+    const lines = [];
+    if (lesson) lines.push('课程：' + lesson);
+    lines.push('题型：' + (q.kindText || '未知'));
+    lines.push('题目：' + q.stem);
+    lines.push('选项：\n' + options);
+    lines.push('请先逐项简要判断（两三句即可），最后单独一行输出 JSON 答案：');
+    return [
+      {
+        role: 'system',
+        content: [
+          '你是中国高校「实验室安全准入」考试的答题助手，依据中国大陆高校实验室安全规范、国家标准和通用安全常识作答。',
+          '要求：',
+          '1. 逐项判断每个选项；题目情境不明确时，选最安全、最规范、最保守的做法。',
+          '2. 注意绝对化表述（必须/严禁/所有/任何/一律）在判断题里常是陷阱；遇到「以上都对/以上都不对」要先验证其他选项。',
+          '3. 多选题必须选出全部正确项，不漏选、不多选；单选题只选一个。',
+          '4. 最后一行只输出 JSON，如 {"answer":"A"}；多选题如 {"answer":"AC"}。'
+        ].join('\n')
+      },
+      { role: 'user', content: lines.join('\n') }
+    ];
+  }
 
-    const resp = await aiRequest(payload);
-    if (resp && resp.error) {
-      throw new Error(resp.error.message || JSON.stringify(resp.error).slice(0, 80));
+  function askOnce(q, payload) {
+    return aiRequest(payload).then(resp => {
+      if (resp && resp.error) {
+        throw new Error(resp.error.message || JSON.stringify(resp.error).slice(0, 80));
+      }
+      const choice = resp && resp.choices && resp.choices[0];
+      const message = choice && choice.message;
+      if (!message) throw new Error('返回结构异常：' + JSON.stringify(resp).slice(0, 80));
+      // 部分思考模型会把内容放在 reasoning_content，content 为空
+      const content = String(message.content || message.reasoning_content || '').trim();
+      if (!content) throw new Error('AI 返回为空');
+      const letters = parseAiAnswer(content, q);
+      if (!letters.length) {
+        const cut = choice.finish_reason === 'length' ? '；输出被截断，请调大「最大 tokens」' : '';
+        throw new Error('无法解析选项：' + content.slice(0, 40) + cut);
+      }
+      return { letters, raw: content };
+    });
+  }
+
+  function voteLetters(results, total) {
+    const sets = results.map(r => r.letters);
+    if (!sets.length) return { letters: [], agree: 0, total };
+    const counts = new Map();
+    sets.forEach(s => {
+      const k = s.join('');
+      counts.set(k, (counts.get(k) || 0) + 1);
+    });
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    // 多数票直接胜出
+    if (ranked[0][1] >= 2) {
+      return { letters: ranked[0][0].split(''), agree: ranked[0][1], total };
     }
-    const content = resp && resp.choices && resp.choices[0] && resp.choices[0].message
-      ? resp.choices[0].message.content
-      : '';
-    if (!content) throw new Error('AI 返回为空');
+    if (sets.length === 1) return { letters: sets[0].slice(), agree: 1, total };
+    // 多选时几次结果可能只差一项：逐字母过半
+    const letterCount = {};
+    sets.forEach(s => s.forEach(l => { letterCount[l] = (letterCount[l] || 0) + 1; }));
+    const need = Math.ceil(sets.length / 2);
+    const letters = Object.keys(letterCount).filter(l => letterCount[l] >= need).sort();
+    if (letters.length) {
+      const agree = sets.filter(s => s.length === letters.length && letters.every(l => s.includes(l))).length;
+      return { letters, agree, total };
+    }
+    return { letters: ranked[0][0].split(''), agree: ranked[0][1], total };
+  }
 
-    const letters = parseAiAnswer(content, q);
-    if (!letters.length) throw new Error('无法解析选项：' + String(content).slice(0, 40));
-    writeAiCache(q.stem, letters);
-    return { letters, raw: String(content) };
+  async function aiAnswer(q) {
+    const key = cacheKey(q);
+    const cached = readAiCache(key);
+    if (cached) return { letters: cached.letters, raw: '(缓存)', votes: cached.votes };
+
+    const n = Math.max(1, Math.min(5, Number(CFG.aiVotes) || 1));
+    const maxTokens = Math.max(64, Math.min(8192, Number(CFG.aiMaxTokens) || 1024));
+    const payload = Object.assign(
+      {},
+      { temperature: n > 1 ? 0.7 : 0, max_tokens: maxTokens },
+      aiExtraParams(),
+      { model: CFG.aiModel, messages: buildQuizMessages(q) }
+    );
+
+    const settled = await Promise.allSettled(
+      Array.from({ length: n }, () => askOnce(q, payload))
+    );
+    const ok = settled.filter(r => r.status === 'fulfilled').map(r => r.value);
+    if (!ok.length) {
+      const first = settled.find(r => r.status === 'rejected');
+      throw new Error(first ? first.reason.message : 'AI 请求失败');
+    }
+
+    const { letters, agree, total } = voteLetters(ok, n);
+    if (!letters.length) throw new Error('没有可用答案');
+    const winner = ok.find(r => r.letters.join('') === letters.join('')) || ok[0];
+    const votes = `${agree}/${total}`;
+    writeAiCache(key, letters, votes);
+    return { letters, raw: winner.raw, votes };
   }
 
   // ---------------- 弹窗习题 ----------------
@@ -360,14 +455,16 @@
       let source = 'default';
       let aiError = '';
       let aiRaw = '';
+      let aiVotes = '';
 
       if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
         try {
           const result = await aiAnswer(q);
           letters = result.letters;
           aiRaw = result.raw;
+          aiVotes = result.votes;
           source = 'ai';
-          setAiStatus(`AI 返回「${aiRaw.replace(/\s+/g, ' ').slice(0, 40)}」→ ${letters.join('')}`);
+          setAiStatus(`AI ${aiVotes} → ${letters.join('')}｜${String(aiRaw).replace(/\s+/g, ' ').slice(0, 30)}`);
         } catch (e) {
           aiError = e.message;
           setAiStatus('AI 失败：' + e.message + '，改用默认选项');
@@ -390,6 +487,7 @@
         stem: q.stem,
         picked: letters,
         source,
+        aiVotes,
         aiError,
         aiRaw: aiRaw.slice(0, 200)
       });
@@ -400,7 +498,8 @@
         else if (!CFG.aiBaseUrl || !CFG.aiModel) why = 'AI 配置不完整';
         else if (aiError) why = 'AI 失败';
       }
-      setStatus(`已作答：${letters.join('')}（${source === 'ai' ? 'AI' : '默认'}${why ? ' · ' + why : ''}）`);
+      const tag = source === 'ai' ? `AI${aiVotes ? ' ' + aiVotes : ''}` : '默认';
+      setStatus(`已作答：${letters.join('')}（${tag}${why ? ' · ' + why : ''}）`);
       console.log('[SAKT] 作答:', q.stem, '→', letters.join(''), source);
     } finally {
       answering = false;
@@ -694,6 +793,8 @@
       }
       #sakt-panel .sakt-page {
         display: none;
+        max-height: 62vh;
+        overflow-y: auto;
         padding: 12px;
       }
       #sakt-panel .sakt-page.active {
@@ -853,13 +954,23 @@
         <label class="sakt-field"><span>接口地址</span><input type="text" id="sakt-baseurl" placeholder="https://api.deepseek.com/v1"></label>
         <label class="sakt-field"><span>API Key</span><input type="password" id="sakt-apikey" placeholder="sk-..."></label>
         <label class="sakt-field"><span>模型</span><input type="text" id="sakt-model" placeholder="deepseek-chat"></label>
-        <label class="sakt-field"><span>超时(ms)</span><input type="number" id="sakt-timeout" min="3000" max="120000" step="1000"></label>
+        <label class="sakt-field"><span>超时(ms)</span><input type="number" id="sakt-timeout" min="3000" max="180000" step="1000"></label>
+        <label class="sakt-field"><span>最大 tokens</span><input type="number" id="sakt-maxtokens" min="64" max="8192" step="64"></label>
+        <label class="sakt-field"><span>投票次数</span>
+          <select id="sakt-votes">
+            <option value="1">1 次（快）</option>
+            <option value="3">3 次（准）</option>
+            <option value="5">5 次（最准）</option>
+          </select>
+        </label>
+        <label class="sakt-field"><span>额外参数</span><input type="text" id="sakt-extra" placeholder='{"reasoning_effort":"high"}'></label>
         <div class="sakt-actions">
-          <button class="sakt-btn ghost" id="sakt-test-ai">测试连接</button>
           <button class="sakt-btn solid" id="sakt-save-ai">保存</button>
+          <button class="sakt-btn ghost" id="sakt-test-ai">测试连接</button>
+          <button class="sakt-btn ghost" id="sakt-clear-cache">清空缓存</button>
         </div>
         <div class="sakt-status" id="sakt-ai-status"></div>
-        <div class="sakt-hint">OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等均可）。Key 只存在本机 localStorage。AI 答错同样会计入平台答题记录。</div>
+        <div class="sakt-hint">OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等均可）。Key 只存在本机 localStorage。开思考模式请把「最大 tokens」调到 1024 以上；不同厂商的思考/联网参数可写在「额外参数」里，脚本原样透传。</div>
       </div>
     `;
     document.body.appendChild(root);
@@ -888,6 +999,9 @@
     el.apikey = $('#sakt-apikey', root);
     el.model = $('#sakt-model', root);
     el.timeout = $('#sakt-timeout', root);
+    el.maxtokens = $('#sakt-maxtokens', root);
+    el.votes = $('#sakt-votes', root);
+    el.extra = $('#sakt-extra', root);
 
     el.rate.value = CFG.rate;
     el.muted.checked = !!CFG.muted;
@@ -898,11 +1012,18 @@
     el.baseurl.value = CFG.aiBaseUrl || '';
     el.apikey.value = CFG.aiKey || '';
     el.model.value = CFG.aiModel || '';
-    el.timeout.value = CFG.aiTimeout || 20000;
+    el.timeout.value = CFG.aiTimeout || DEFAULTS.aiTimeout;
+    el.maxtokens.value = CFG.aiMaxTokens || DEFAULTS.aiMaxTokens;
+    el.votes.value = String(CFG.aiVotes || DEFAULTS.aiVotes);
+    el.extra.value = CFG.aiExtra || '';
 
     $('#sakt-save-cfg', root).addEventListener('click', saveSettings);
     $('#sakt-save-ai', root).addEventListener('click', saveAiSettings);
     $('#sakt-test-ai', root).addEventListener('click', testAi);
+    $('#sakt-clear-cache', root).addEventListener('click', () => {
+      localStorage.removeItem(AICACHE);
+      setAiStatus('AI 答案缓存已清空，下道题会重新请求');
+    });
 
     renderActions();
     renderStatus();
@@ -949,9 +1070,23 @@
     CFG.aiKey = el.apikey.value.trim();
     CFG.aiModel = el.model.value.trim();
     const t = Number(el.timeout.value);
-    CFG.aiTimeout = Number.isFinite(t) && t >= 3000 ? t : DEFAULTS.aiTimeout;
+    CFG.aiTimeout = Number.isFinite(t) && t >= 3000 && t <= 180000 ? Math.round(t) : DEFAULTS.aiTimeout;
+    const mt = Number(el.maxtokens.value);
+    CFG.aiMaxTokens = Number.isFinite(mt) && mt >= 64 && mt <= 8192 ? Math.round(mt) : DEFAULTS.aiMaxTokens;
+    const v = Number(el.votes.value);
+    CFG.aiVotes = [1, 3, 5].includes(v) ? v : DEFAULTS.aiVotes;
+    CFG.aiExtra = el.extra.value.trim();
     saveConfig();
-    setAiStatus('AI 设置已保存');
+
+    let note = '';
+    if (CFG.aiExtra) {
+      try {
+        if (!isPlainObject(JSON.parse(CFG.aiExtra))) note = '（额外参数必须是 JSON 对象，已忽略）';
+      } catch (e) {
+        note = '（额外参数不是合法 JSON，已忽略）';
+      }
+    }
+    setAiStatus('AI 设置已保存' + note);
   }
 
   async function testAi() {
@@ -963,20 +1098,23 @@
     setAiStatus('测试中…');
     const started = Date.now();
     try {
-      const resp = await aiRequest({
-        model: CFG.aiModel,
-        temperature: 0,
-        max_tokens: 4,
-        messages: [{ role: 'user', content: '只输出数字 1' }]
-      });
+      const maxTokens = Math.max(256, Math.min(2048, Number(CFG.aiMaxTokens) || 1024));
+      const resp = await aiRequest(Object.assign(
+        {},
+        { temperature: 0, max_tokens: maxTokens },
+        aiExtraParams(),
+        { model: CFG.aiModel, messages: [{ role: 'user', content: '请只输出数字 1' }] }
+      ));
       if (resp && resp.error) {
         throw new Error(resp.error.message || JSON.stringify(resp.error).slice(0, 80));
       }
-      const message = resp && resp.choices && resp.choices[0] && resp.choices[0].message;
+      const choice = resp && resp.choices && resp.choices[0];
+      const message = choice && choice.message;
       if (!message) throw new Error('返回结构异常：' + JSON.stringify(resp).slice(0, 80));
-      const text = String(message.content || '').trim();
+      const text = String(message.content || message.reasoning_content || '').trim();
       const usage = resp.usage && resp.usage.total_tokens ? `，${resp.usage.total_tokens} tokens` : '';
-      setAiStatus(`模型已回复（${Date.now() - started}ms${usage}）：「${text || '(空)'}」`);
+      const cut = choice.finish_reason === 'length' ? '（输出被截断，请调大「最大 tokens」）' : '';
+      setAiStatus(`模型已回复（${Date.now() - started}ms${usage}）：「${text || '(空)'}」${cut}`);
     } catch (e) {
       setAiStatus('失败：' + e.message);
     }
@@ -1036,6 +1174,7 @@
   W.__saktStart = start;
   W.__saktStop = stop;
   W.__saktParse = parseAiAnswer;
+  W.__saktAsk = aiAnswer;
 
   (async () => {
     buildPanel();
