@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.5.0
-// @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
+// @version      1.6.0
+// @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时、AI 答题、考试页自动作答。
 // @author       buerka
 // @license      MIT
-// @match        https://sakt.nuist.edu.cn/students/courseDetail*
+// @match        https://sakt.nuist.edu.cn/students/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -19,7 +19,7 @@
  * 用法（Tampermonkey）：
  *   1. 安装 Tampermonkey，新建脚本粘贴本文件并保存
  *   2. 登录平台，进入课程页，右下角面板点「开始自动学习」
- *   3. 面板分三页：运行 / 设置 / AI
+ *   3. 面板分四页：运行 / 设置 / AI / 考试；标题栏可拖动，右上角可最小化
  *
  * 说明：
  *   - 视频真实按设定倍速播放，完成记录由平台自身接口写入，脚本不伪造进度
@@ -46,13 +46,15 @@
     aiTimeout: 30000,
     aiMaxTokens: 1024,
     aiVotes: 3,
-    aiExtra: ''
+    aiExtra: '',
+    examAutoSubmit: false
   };
 
   const CFG_KEY = 'sakt.config';
   const TOKEN_KEY = 'pro__Access-Token';
   const QKEY = 'sakt.queue';
   const QLOG = 'sakt.quizlog';
+  const EXAMLOG = 'sakt.examlog';
   const AICACHE = 'sakt.aiCache';
   const AUTO = 'sakt.auto';
 
@@ -843,8 +845,275 @@
   }
 
   // ---------------- 面板 ----------------
-  const state = { running: false, starting: false, tab: 'run', status: '' };
+  const state = {
+    running: false,
+    starting: false,
+    tab: 'run',
+    status: '',
+    examRunning: false,
+    examStop: false,
+    examSeen: false,
+    examStatus: ''
+  };
   const el = {};
+
+  // ---------------- 考试页 ----------------
+  function examActive() {
+    const box = document.querySelector('.question-content');
+    if (!box || !box.querySelector('.stem')) return false;
+    return [...document.querySelectorAll('p.remark')].some(p => (p.innerText || '').includes('倒计时'));
+  }
+
+  function examInfo() {
+    if (!examActive()) return null;
+    const remark = [...document.querySelectorAll('p.remark')].find(p => (p.innerText || '').includes('倒计时'));
+    const text = remark ? remark.innerText.replace(/\s+/g, ' ') : '';
+    const navs = [...document.querySelectorAll('.index-num')];
+    const total = Number((text.match(/共\s*(\d+)\s*题/) || [])[1]) || navs.length;
+    const timer = (text.match(/倒计时[：:]\s*([\d:]+)/) || [])[1] || '';
+    const idx = Number((document.querySelector('.index-num.active-num') || {}).innerText || 0);
+    const answered = navs.filter(n => n.querySelector('.ant-badge-status-success')).length;
+    return { total, timer, idx, answered };
+  }
+
+  function readExamQuestion() {
+    const box = document.querySelector('.question-content');
+    if (!box) return null;
+    const stemEl = box.querySelector('.stem');
+    const kindText = ((box.querySelector('.stem .grey') || {}).innerText || '').replace(/[()（）]/g, '').trim();
+    const stem = String(stemEl ? stemEl.innerText : '')
+      .replace(/^第\s*\d+\s*题\s*[：:]\s*/, '')
+      .replace(/^[（(][^）)]*[）)]\s*/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const wrappers = [...box.querySelectorAll('.ant-checkbox-wrapper, .ant-radio-wrapper')];
+    const options = [];
+    wrappers.forEach(w => {
+      const input = w.querySelector('input');
+      const letter = String((input && input.value) || '').toUpperCase();
+      if (!letter) return;
+      const parent = w.parentElement;
+      let text = parent && parent.querySelector('.ml6') ? parent.querySelector('.ml6').innerText : '';
+      if (!text && parent) text = parent.innerText.replace(/^\s*[A-Za-z]\s*[：:]\s*/, '');
+      options.push({ letter, text: String(text || '').replace(/\s+/g, ' ').trim() });
+    });
+    const multi = !!box.querySelector('.ant-checkbox-group') || /多选|多项/.test(kindText);
+    const checked = wrappers
+      .filter(w => w.querySelector('input') && w.querySelector('input').checked)
+      .map(w => String(w.querySelector('input').value).toUpperCase());
+    return { kindText, stem, options, multi, checked };
+  }
+
+  async function examGoTo(i) {
+    const active = () => (document.querySelector('.index-num.active-num') || {}).innerText.trim();
+    if (active() === String(i)) return true;
+    const node = [...document.querySelectorAll('.index-num')].find(n => (n.innerText || '').trim() === String(i));
+    if (!node) return false;
+    node.click();
+    for (let k = 0; k < 40; k++) {
+      await sleep(100);
+      if (active() === String(i)) return true;
+    }
+    return false;
+  }
+
+  async function examChoose(letters) {
+    const box = () => document.querySelector('.question-content');
+    if (!box()) return false;
+    const multi = !!box().querySelector('.ant-checkbox-group');
+    const find = letter => [...box().querySelectorAll('.ant-checkbox-wrapper, .ant-radio-wrapper')]
+      .find(w => String((w.querySelector('input') || {}).value || '').toUpperCase() === letter);
+
+    if (multi) {
+      const all = [...box().querySelectorAll('.ant-checkbox-wrapper')];
+      for (const w of all) {
+        const letter = String((w.querySelector('input') || {}).value || '').toUpperCase();
+        if (!letters.includes(letter) && w.querySelector('input').checked) {
+          const fresh = find(letter);
+          if (fresh) fresh.click();
+          await sleep(120);
+        }
+      }
+    }
+    for (const letter of letters) {
+      let ok = false;
+      // 每次重新查节点并确认真的勾上：Vue 会在勾选后重渲染，旧节点再点可能不生效
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        const w = find(letter);
+        if (!w) break;
+        if (w.querySelector('input').checked) { ok = true; break; }
+        w.click();
+        for (let k = 0; k < 8; k++) {
+          await sleep(60);
+          const cur = find(letter);
+          if (cur && cur.querySelector('input').checked) { ok = true; break; }
+        }
+      }
+    }
+    return true;
+  }
+
+  function logExam(entry) {
+    try {
+      const log = JSON.parse(localStorage.getItem(EXAMLOG) || '[]');
+      log.push(entry);
+      localStorage.setItem(EXAMLOG, JSON.stringify(log.slice(-200)));
+    } catch (e) { /* ignore */ }
+  }
+
+  function setExamStatus(text) {
+    state.examStatus = text;
+    if (el.examStatus) el.examStatus.textContent = text;
+  }
+
+  function renderExam() {
+    if (!el.examTitle) return;
+    const info = examInfo();
+    if (!info) {
+      el.examTitle.textContent = '未检测到进行中的考试';
+      el.examProgress.textContent = '-';
+      el.examTimer.textContent = '-';
+      return;
+    }
+    el.examTitle.textContent = `共 ${info.total} 题`;
+    el.examProgress.textContent = `${info.answered}/${info.total} 已答 · 当前第 ${info.idx} 题`;
+    el.examTimer.textContent = info.timer || '-';
+  }
+
+  function renderExamActions() {
+    if (!el.examActions) return;
+    if (state.examRunning) {
+      el.examActions.innerHTML = '<button class="sakt-btn ghost" id="sakt-exam-stop">停止</button>';
+      $('#sakt-exam-stop', el.examActions).addEventListener('click', stopExam);
+    } else {
+      el.examActions.innerHTML = '<button class="sakt-btn solid" id="sakt-exam-start">开始自动答题</button>';
+      $('#sakt-exam-start', el.examActions).addEventListener('click', startExam);
+    }
+  }
+
+  function stopExam() {
+    state.examStop = true;
+    setExamStatus('正在停止…');
+  }
+
+  async function submitExam() {
+    const btn = [...document.querySelectorAll('button')].find(b => (b.innerText || '').replace(/\s+/g, '') === '提交');
+    if (!btn) { setExamStatus('找不到「提交」按钮，请手动提交'); return; }
+    btn.click();
+    await sleep(800);
+    const modal = document.querySelector('.ant-modal');
+    if (!modal) { setExamStatus('已点击提交，请在页面上确认结果'); return; }
+    const ok = [...modal.querySelectorAll('button')].find(b => /^(确定|确认|是|提交|继续提交|仍然提交|仍要提交)$/.test((b.innerText || '').replace(/\s+/g, '')));
+    if (ok) { ok.click(); setExamStatus('已提交试卷'); return; }
+    setExamStatus('提交弹窗未找到确定按钮，请手动确认');
+  }
+
+  async function startExam() {
+    if (state.examRunning) return;
+    const info = examInfo();
+    if (!info) { setExamStatus('未检测到进行中的考试'); return; }
+    if (!CFG.useAI || !CFG.aiBaseUrl || !CFG.aiModel) {
+      const go = window.confirm(`AI 未配置，将用默认选项（${CFG.answerFirst || 'A'}）作答，确定继续？`);
+      if (!go) return;
+    }
+    state.examRunning = true;
+    state.examStop = false;
+    renderExamActions();
+    const total = info.total;
+    let answered = 0;
+    let failed = 0;
+    setExamStatus(`开始自动答题：共 ${total} 题`);
+    try {
+      for (let i = 1; i <= total; i++) {
+        if (state.examStop) break;
+        if (!(await examGoTo(i))) {
+          failed++;
+          setExamStatus(`第 ${i} 题定位失败，跳过`);
+          continue;
+        }
+        let q = readExamQuestion();
+        for (let k = 0; k < 20 && (!q || !q.options.length); k++) {
+          await sleep(100);
+          q = readExamQuestion();
+        }
+        if (!q || !q.options.length) { failed++; continue; }
+        if (q.checked.length) {
+          answered++;
+          setExamStatus(`第 ${i}/${total} 题已答，跳过`);
+          renderExam();
+          continue;
+        }
+
+        let letters = [];
+        let source = 'default';
+        let votes = '';
+        let err = '';
+        if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
+          try {
+            const r = await aiAnswer(q);
+            letters = r.letters;
+            votes = r.votes;
+            source = 'ai';
+          } catch (e) {
+            err = e.message;
+          }
+        }
+        if (!letters.length) letters = [CFG.answerFirst || 'A'];
+        await examChoose(letters);
+        await sleep(200);
+        let picked = (readExamQuestion() || {}).checked || [];
+        if (!picked.length) {
+          await examChoose(letters);
+          await sleep(300);
+          picked = (readExamQuestion() || {}).checked || [];
+        }
+        if (!picked.length) failed++;
+        answered++;
+        logExam({
+          t: Date.now(),
+          idx: i,
+          kind: q.kindText,
+          stem: q.stem.slice(0, 160),
+          picked,
+          source,
+          votes,
+          err
+        });
+        const tag = source === 'ai' ? `AI ${votes}` : '默认';
+        setExamStatus(`第 ${i}/${total} 题 → ${picked.join('') || letters.join('')}（${tag}${err ? ' · ' + err : ''}）`);
+        renderExam();
+        if (i < total) await sleep(500 + Math.random() * 400);
+      }
+
+      if (state.examStop) {
+        setExamStatus(`已停止：本次答了 ${answered}/${total} 题`);
+      } else if (CFG.examAutoSubmit) {
+        setExamStatus(`已答完 ${answered}/${total} 题，正在提交…`);
+        await submitExam();
+      } else {
+        setExamStatus(`已答完 ${answered}/${total} 题${failed ? `，${failed} 题失败` : ''}，请检查后手动提交`);
+      }
+    } catch (e) {
+      setExamStatus('考试答题中断：' + e.message);
+    } finally {
+      state.examRunning = false;
+      renderExamActions();
+      renderExam();
+    }
+  }
+
+  function startExamWatch() {
+    setInterval(() => {
+      if (!document.getElementById('sakt-panel')) return;
+      if (!examActive()) return;
+      if (!state.examSeen) {
+        state.examSeen = true;
+        switchTab('exam');
+        renderExamActions();
+      }
+      if (state.tab === 'exam') renderExam();
+    }, 1000);
+  }
 
   function injectCSS() {
     if (document.getElementById('sakt-style')) return;
@@ -871,6 +1140,31 @@
         justify-content: space-between;
         padding: 10px 12px;
         border-bottom: 1px solid #111111;
+        cursor: move;
+        user-select: none;
+        touch-action: none;
+      }
+      #sakt-panel.dragging {
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+      }
+      #sakt-panel .sakt-head-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #sakt-panel .sakt-min {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: #999999;
+        font-size: 14px;
+        line-height: 16px;
+        cursor: pointer;
+      }
+      #sakt-panel .sakt-min:hover {
+        color: #111111;
       }
       #sakt-panel .sakt-title b {
         font-size: 11px;
@@ -1024,8 +1318,114 @@
         font-size: 11.5px;
         word-break: break-all;
       }
+      #sakt-panel.min {
+        width: auto;
+        min-width: 148px;
+      }
+      #sakt-panel.min .sakt-head {
+        border-bottom: 0;
+      }
+      #sakt-panel.min .sakt-tabs,
+      #sakt-panel.min .sakt-page,
+      #sakt-panel.min .sakt-page.active {
+        display: none;
+      }
     `;
     document.head.appendChild(style);
+  }
+
+  function setupPanelUI(root) {
+    const head = $('.sakt-head', root);
+    const minBtn = $('#sakt-min', root);
+    if (!head || !minBtn) return;
+    const KEY = 'sakt.panelUI';
+
+    const clamp = (left, top) => {
+      const w = root.offsetWidth;
+      const h = root.offsetHeight;
+      const maxLeft = Math.max(0, window.innerWidth - w);
+      const maxTop = Math.max(0, window.innerHeight - h);
+      return { left: Math.min(Math.max(0, left), maxLeft), top: Math.min(Math.max(0, top), maxTop) };
+    };
+    const place = (left, top) => {
+      root.style.left = left + 'px';
+      root.style.top = top + 'px';
+      root.style.right = 'auto';
+      root.style.bottom = 'auto';
+    };
+    const save = () => {
+      try {
+        const r = root.getBoundingClientRect();
+        localStorage.setItem(KEY, JSON.stringify({
+          left: Math.round(r.left),
+          top: Math.round(r.top),
+          min: root.classList.contains('min')
+        }));
+      } catch (e) { /* ignore */ }
+    };
+    const setMin = (on, persist) => {
+      root.classList.toggle('min', on);
+      minBtn.textContent = on ? '+' : '−';
+      minBtn.title = on ? '展开' : '最小化';
+      if (root.style.left) {
+        const r = root.getBoundingClientRect();
+        const c = clamp(r.left, r.top);
+        place(c.left, c.top);
+      }
+      if (persist) save();
+    };
+
+    // 恢复上次的位置和最小化状态
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (saved && typeof saved === 'object') {
+        if (saved.min) root.classList.add('min');
+        if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+          const c = clamp(saved.left, saved.top);
+          place(c.left, c.top);
+        }
+      }
+    } catch (e) { /* ignore */ }
+    minBtn.textContent = root.classList.contains('min') ? '+' : '−';
+    minBtn.title = root.classList.contains('min') ? '展开' : '最小化';
+
+    let drag = null;
+    head.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      if (e.target.closest('button, input, select, a')) return;
+      const r = root.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false };
+      try { head.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      root.classList.add('dragging');
+      e.preventDefault();
+    });
+    head.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const c = clamp(e.clientX - drag.dx, e.clientY - drag.dy);
+      place(c.left, c.top);
+      drag.moved = true;
+    });
+    const endDrag = e => {
+      if (!drag) return;
+      if (drag.moved) save();
+      drag = null;
+      root.classList.remove('dragging');
+      try { head.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    };
+    head.addEventListener('pointerup', endDrag);
+    head.addEventListener('pointercancel', endDrag);
+
+    minBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      setMin(!root.classList.contains('min'), true);
+    });
+
+    window.addEventListener('resize', () => {
+      if (!root.style.left) return;
+      const r = root.getBoundingClientRect();
+      const c = clamp(r.left, r.top);
+      place(c.left, c.top);
+    });
   }
 
   function buildPanel() {
@@ -1035,12 +1435,16 @@
     root.innerHTML = `
       <div class="sakt-head">
         <span class="sakt-title"><b>SAKT</b><i>自动学习</i></span>
-        <span class="sakt-dot" id="sakt-dot">●</span>
+        <span class="sakt-head-right">
+          <span class="sakt-dot" id="sakt-dot">●</span>
+          <button class="sakt-min" id="sakt-min" type="button" title="最小化">−</button>
+        </span>
       </div>
       <div class="sakt-tabs">
         <button class="sakt-tab active" data-tab="run">运行</button>
         <button class="sakt-tab" data-tab="cfg">设置</button>
         <button class="sakt-tab" data-tab="ai">AI</button>
+        <button class="sakt-tab" data-tab="exam">考试</button>
       </div>
       <div class="sakt-page active" data-page="run">
         <div class="sakt-row"><span class="sakt-muted">剩余</span><span class="sakt-value" id="sakt-left">-</span></div>
@@ -1091,8 +1495,18 @@
         <div class="sakt-status" id="sakt-ai-status"></div>
         <div class="sakt-hint">OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等均可）。Key 只存在本机 localStorage。开思考模式请把「最大 tokens」调到 1024 以上；不同厂商的思考/联网参数可写在「额外参数」里，脚本原样透传。</div>
       </div>
+      <div class="sakt-page" data-page="exam">
+        <div class="sakt-row"><span class="sakt-muted">试卷</span><span class="sakt-value" id="sakt-exam-title">-</span></div>
+        <div class="sakt-row"><span class="sakt-muted">进度</span><span class="sakt-value" id="sakt-exam-progress">-</span></div>
+        <div class="sakt-row"><span class="sakt-muted">倒计时</span><span class="sakt-value" id="sakt-exam-timer">-</span></div>
+        <label class="sakt-field"><span>答完自动提交</span><input type="checkbox" id="sakt-exam-submit"></label>
+        <div class="sakt-actions" id="sakt-exam-actions"></div>
+        <div class="sakt-status" id="sakt-exam-status"></div>
+        <div class="sakt-hint">先在考试列表点「开始考试」进入答题页，再点「开始自动答题」。脚本按题号顺序作答，已答的题会跳过；默认不自动提交。模拟考试不计成绩，正式考试请自行确认风险。</div>
+      </div>
     `;
     document.body.appendChild(root);
+    setupPanelUI(root);
 
     el.root = root;
     el.dot = $('#sakt-dot', root);
@@ -1121,6 +1535,12 @@
     el.maxtokens = $('#sakt-maxtokens', root);
     el.votes = $('#sakt-votes', root);
     el.extra = $('#sakt-extra', root);
+    el.examTitle = $('#sakt-exam-title', root);
+    el.examProgress = $('#sakt-exam-progress', root);
+    el.examTimer = $('#sakt-exam-timer', root);
+    el.examSubmit = $('#sakt-exam-submit', root);
+    el.examActions = $('#sakt-exam-actions', root);
+    el.examStatus = $('#sakt-exam-status', root);
 
     el.rate.value = CFG.rate;
     el.muted.checked = !!CFG.muted;
@@ -1135,6 +1555,7 @@
     el.maxtokens.value = CFG.aiMaxTokens || DEFAULTS.aiMaxTokens;
     el.votes.value = String(CFG.aiVotes || DEFAULTS.aiVotes);
     el.extra.value = CFG.aiExtra || '';
+    el.examSubmit.checked = !!CFG.examAutoSubmit;
 
     $('#sakt-save-cfg', root).addEventListener('click', saveSettings);
     $('#sakt-save-ai', root).addEventListener('click', saveAiSettings);
@@ -1143,9 +1564,16 @@
       localStorage.removeItem(AICACHE);
       setAiStatus('AI 答案缓存已清空，下道题会重新请求');
     });
+    el.examSubmit.addEventListener('change', () => {
+      CFG.examAutoSubmit = el.examSubmit.checked;
+      saveConfig();
+      setExamStatus(CFG.examAutoSubmit ? '答完试卷后会自动点提交' : '答完试卷后不自动提交');
+    });
 
     renderActions();
     renderStatus();
+    renderExamActions();
+    renderExam();
   }
 
   function switchTab(name) {
@@ -1156,6 +1584,10 @@
     document.querySelectorAll('#sakt-panel .sakt-page').forEach(page => {
       page.classList.toggle('active', page.dataset.page === name);
     });
+    if (name === 'exam') {
+      renderExam();
+      renderExamActions();
+    }
   }
 
   function setStatus(text) {
@@ -1294,9 +1726,13 @@
   W.__saktStop = stop;
   W.__saktParse = parseAiAnswer;
   W.__saktAsk = aiAnswer;
+  W.__saktExamRead = readExamQuestion;
+  W.__saktExamStart = startExam;
+  W.__saktExamStop = stopExam;
 
   (async () => {
     buildPanel();
+    startExamWatch();
     if (!curGraph() || !curId()) {
       setStatus('请在课程学习页使用');
       return;
