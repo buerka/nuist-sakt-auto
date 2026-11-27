@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.8.0
+// @version      1.9.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时、AI 答题、考试页自动作答。
 // @author       buerka
 // @license      MIT
@@ -123,6 +123,62 @@
 
   async function ensureQueue() {
     return loadQueue() || buildQueue();
+  }
+
+  async function scanWrongLessons() {
+    const r = await api('/jcedutec/courseSource/myCourseTypeTree', { id: curId(), graphId: curGraph() });
+    if (!r.success) throw new Error(r.message || '拉取课程目录失败');
+    const lessons = [];
+    (r.result || []).forEach(g => (g.children || []).forEach(c => lessons.push({ id: c.key, name: c.title })));
+    const items = [];
+    for (let i = 0; i < lessons.length; i++) {
+      const c = lessons[i];
+      setStatus(`扫描错题：${i + 1}/${lessons.length}`);
+      try {
+        const d = await api('/jcedutec/courseSource/getById', { id: c.id, graphId: curGraph() });
+        if (d.success && Number(d.result.unCorrect) > 0) {
+          items.push({
+            id: c.id,
+            name: d.result.name || c.name,
+            wrong: Number(d.result.unCorrect) || 0,
+            dur: Number(d.result.duration) || 0
+          });
+        }
+      } catch (e) { /* 单节失败就跳过 */ }
+      await sleep(80);
+    }
+    return items;
+  }
+
+  async function relearn() {
+    if (state.starting || timer) return;
+    const go = window.confirm('将扫描所有课时的错题，只重播有错题的课时，并按题库/AI 重新作答。期间请保持页面打开。确定开始扫描？');
+    if (!go) return;
+    state.starting = true;
+    let items = [];
+    try {
+      setStatus('正在扫描错题…');
+      items = await scanWrongLessons();
+    } catch (e) {
+      setStatus('扫描失败：' + e.message);
+      return;
+    } finally {
+      state.starting = false;
+    }
+    if (!items.length) {
+      setStatus('没有需要重修的课时');
+      return;
+    }
+    const wrongTotal = items.reduce((sum, x) => sum + x.wrong, 0);
+    const seconds = items.reduce((sum, x) => sum + x.dur, 0);
+    const minutes = Math.max(1, Math.round(seconds / Math.max(1, CFG.rate) / 60 + items.length * 0.1));
+    const ok = window.confirm(`找到 ${items.length} 节有错题的课时（共 ${wrongTotal} 处），预计 ${minutes} 分钟。开始重修？`);
+    if (!ok) {
+      setStatus('已取消重修');
+      return;
+    }
+    saveQueue({ graphId: curGraph(), items: items.map(x => ({ id: x.id, name: x.name })) });
+    await start();
   }
 
   // ---------------- 页面读取 ----------------
@@ -1900,8 +1956,10 @@
     } else {
       el.actions.innerHTML = `
         <button class="sakt-btn solid" id="sakt-start">开始自动学习</button>
+        <button class="sakt-btn ghost" id="sakt-relearn">重修错题</button>
       `;
       $('#sakt-start', el.actions).addEventListener('click', start);
+      $('#sakt-relearn', el.actions).addEventListener('click', relearn);
     }
   }
 
@@ -1949,6 +2007,8 @@
   W.__saktBank = bankAnswer;
   W.__saktNormStem = normStem;
   W.__saktNormText = normText;
+  W.__saktScanWrong = scanWrongLessons;
+  W.__saktRelearn = relearn;
 
   (async () => {
     buildPanel();
