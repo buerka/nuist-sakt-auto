@@ -227,7 +227,7 @@ DeepSeek 的 `deepseek-chat` **没有思考开关，也没有「思考强度」�
 
 命中是按「题干 + 选项文本」匹配的：选项顺序被打乱也能把标准答案映射到当前字母；同一题干有多个选项版本时会分别匹配；平台自己标注冲突的 2 道题会跳过、交给 AI。
 
-仓库根目录附带 [sakt-bank.json](./sakt-bank.json)（5,632 条原始记录 → 4,904 个选项变体 / 4,776 个题干，含平台标准答案），下载后从面板「导入 JSON」导入：
+仓库根目录附带 [sakt-bank.json](./sakt-bank.json)（5,632 条原始记录 → 4,925 个选项变体 / 4,628 个题干，含平台标准答案；其中 21 道课中错题的标准答案来自「错题详情」），下载后从面板「导入 JSON」导入：
 
 ```
 https://raw.githubusercontent.com/buerka/nuist-sakt-auto/main/sakt-bank.json
