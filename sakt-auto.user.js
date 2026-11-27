@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.7.0
+// @version      1.8.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时、AI 答题、考试页自动作答。
 // @author       buerka
 // @license      MIT
@@ -47,7 +47,8 @@
     aiMaxTokens: 1024,
     aiVotes: 2,
     aiExtra: '',
-    examAutoSubmit: false
+    examAutoSubmit: false,
+    bankFirst: true
   };
 
   const CFG_KEY = 'sakt.config';
@@ -56,6 +57,7 @@
   const QLOG = 'sakt.quizlog';
   const EXAMLOG = 'sakt.examlog';
   const AICACHE = 'sakt.aiCache';
+  const BANK_KEY = 'sakt.bank';
   const AUTO = 'sakt.auto';
 
   let CFG = loadConfig();
@@ -195,6 +197,90 @@
     } catch (e) {
       return {};
     }
+  }
+
+  // ---------------- 本地题库 ----------------
+  let bankIndex = null;
+  let bankMeta = null;
+
+  function normText(s) {
+    return String(s == null ? '' : s)
+      .replace(/\s+/g, '')
+      .replace(/（/g, '(')
+      .replace(/）/g, ')')
+      .replace(/[，]/g, ',')
+      .replace(/[：]/g, ':')
+      .replace(/[；]/g, ';')
+      .replace(/[！]/g, '!')
+      .replace(/[？]/g, '?')
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .trim();
+  }
+
+  function normStem(s) {
+    // 题干匹配忽略结尾标点和空的括号占位，兼容「（）」「（ ）」「。」等写法
+    let t = normText(s).replace(/[。．.、；;，,：:!！?？]+$/g, '');
+    if (t.slice(-2) === '()') t = t.slice(0, -2);
+    return t.replace(/[。．.、；;，,：:!！?？]+$/g, '');
+  }
+
+  function loadBank() {
+    if (bankIndex) return true;
+    try {
+      const raw = localStorage.getItem(BANK_KEY);
+      if (!raw) return false;
+      const data = JSON.parse(raw);
+      if (!data || !Array.isArray(data.questions)) return false;
+      bankMeta = data.meta || { variants: data.questions.length };
+      bankIndex = new Map();
+      data.questions.forEach(v => {
+        if (!v || !v.s || !Array.isArray(v.o) || !Array.isArray(v.a)) return;
+        const key = normStem(v.s);
+        if (!key) return;
+        const list = bankIndex.get(key);
+        if (list) list.push(v);
+        else bankIndex.set(key, [v]);
+      });
+      return bankIndex.size > 0;
+    } catch (e) {
+      bankIndex = null;
+      bankMeta = null;
+      return false;
+    }
+  }
+
+  function bankAnswer(q) {
+    if (!CFG.bankFirst) return null;
+    if (!loadBank()) return null;
+    const variants = bankIndex.get(normStem(q.stem));
+    if (!variants || !variants.length) return null;
+    const current = (q.options || [])
+      .filter(o => o && o.letter && o.text)
+      .map(o => ({ letter: String(o.letter).toUpperCase(), key: normText(o.text) }));
+    if (current.length < 2) return null;
+    if (new Set(current.map(o => o.key)).size !== current.length) return null;
+    const curKey = current.map(o => o.key).sort().join('|');
+    for (const v of variants) {
+      if (v.conflict || !v.o || !v.a || v.o.length !== current.length) continue;
+      const optKeys = v.o.map(normText);
+      if (optKeys.some(k => !k)) continue;
+      if (optKeys.slice().sort().join('|') !== curKey) continue;
+      const answerKeys = v.a
+        .map(l => optKeys['ABCD'.indexOf(String(l).toUpperCase())])
+        .filter(Boolean);
+      if (!answerKeys.length || answerKeys.length !== v.a.length) continue;
+      const letters = [];
+      let ok = true;
+      answerKeys.forEach(k => {
+        const hit = current.find(o => o.key === k);
+        if (!hit) ok = false;
+        else letters.push(hit.letter);
+      });
+      if (!ok || !letters.length) continue;
+      return { letters: [...new Set(letters)].sort(), variant: v };
+    }
+    return null;
   }
 
   function isTrueValue(v) {
@@ -600,7 +686,12 @@
       let aiJudge = '';
       let aiCacheHit = 0;
 
-      if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
+      const fromBank = bankAnswer(q);
+      if (fromBank) {
+        letters = fromBank.letters;
+        source = 'bank';
+        setAiStatus(`题库命中 → ${letters.join('')}`);
+      } else if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
         try {
           const result = await aiAnswer(q);
           letters = result.letters;
@@ -642,12 +733,12 @@
       });
 
       let why = '';
-      if (source !== 'ai') {
+      if (source === 'default') {
         if (!CFG.useAI) why = 'AI 未启用';
         else if (!CFG.aiBaseUrl || !CFG.aiModel) why = 'AI 配置不完整';
         else if (aiError) why = 'AI 失败';
       }
-      const tag = source === 'ai' ? `AI${aiVotes ? ' ' + aiVotes : ''}` : '默认';
+      const tag = source === 'ai' ? `AI${aiVotes ? ' ' + aiVotes : ''}` : source === 'bank' ? '题库' : '默认';
       setStatus(`已作答：${letters.join('')}（${tag}${why ? ' · ' + why : ''}）`);
       console.log('[SAKT] 作答:', q.stem, '→', letters.join(''), source);
     } finally {
@@ -1077,7 +1168,11 @@
         let votes = '';
         let err = '';
         let cacheHit = 0;
-        if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
+        const fromBank = bankAnswer(q);
+        if (fromBank) {
+          letters = fromBank.letters;
+          source = 'bank';
+        } else if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
           try {
             const r = await aiAnswer(q);
             letters = r.letters;
@@ -1110,7 +1205,7 @@
           cacheHit,
           err
         });
-        const tag = source === 'ai' ? `AI ${votes}` : '默认';
+        const tag = source === 'ai' ? `AI ${votes}` : source === 'bank' ? '题库' : '默认';
         setExamStatus(`第 ${i}/${total} 题 → ${picked.join('') || letters.join('')}（${tag}${err ? ' · ' + err : ''}）`);
         renderExam();
         if (i < total) await sleep(500 + Math.random() * 400);
@@ -1476,6 +1571,7 @@
         <button class="sakt-tab" data-tab="cfg">设置</button>
         <button class="sakt-tab" data-tab="ai">AI</button>
         <button class="sakt-tab" data-tab="exam">考试</button>
+        <button class="sakt-tab" data-tab="bank">题库</button>
       </div>
       <div class="sakt-page active" data-page="run">
         <div class="sakt-row"><span class="sakt-muted">剩余</span><span class="sakt-value" id="sakt-left">-</span></div>
@@ -1536,6 +1632,17 @@
         <div class="sakt-status" id="sakt-exam-status"></div>
         <div class="sakt-hint">先在考试列表点「开始考试」进入答题页，再点「开始自动答题」。脚本按题号顺序作答，已答的题会跳过；默认不自动提交。模拟考试不计成绩，正式考试请自行确认风险。</div>
       </div>
+      <div class="sakt-page" data-page="bank">
+        <div class="sakt-row"><span class="sakt-muted">题库</span><span class="sakt-value" id="sakt-bank-info">未导入</span></div>
+        <label class="sakt-field"><span>优先题库</span><input type="checkbox" id="sakt-bank-use"></label>
+        <div class="sakt-actions">
+          <button class="sakt-btn solid" id="sakt-bank-import">导入 JSON</button>
+          <button class="sakt-btn ghost" id="sakt-bank-clear">清除</button>
+        </div>
+        <input type="file" id="sakt-bank-file" accept=".json,application/json" style="display:none">
+        <div class="sakt-status" id="sakt-bank-status"></div>
+        <div class="sakt-hint">导入从题库页导出的 sakt-bank.json。命中题库时直接用平台标准答案，未命中再问 AI。题库只存本机 localStorage，不会上传。</div>
+      </div>
     `;
     document.body.appendChild(root);
     setupPanelUI(root);
@@ -1573,6 +1680,10 @@
     el.examSubmit = $('#sakt-exam-submit', root);
     el.examActions = $('#sakt-exam-actions', root);
     el.examStatus = $('#sakt-exam-status', root);
+    el.bankInfo = $('#sakt-bank-info', root);
+    el.bankUse = $('#sakt-bank-use', root);
+    el.bankStatus = $('#sakt-bank-status', root);
+    el.bankFile = $('#sakt-bank-file', root);
 
     el.rate.value = CFG.rate;
     el.muted.checked = !!CFG.muted;
@@ -1588,6 +1699,7 @@
     el.votes.value = String(CFG.aiVotes || DEFAULTS.aiVotes);
     el.extra.value = CFG.aiExtra || '';
     el.examSubmit.checked = !!CFG.examAutoSubmit;
+    el.bankUse.checked = !!CFG.bankFirst;
 
     $('#sakt-save-cfg', root).addEventListener('click', saveSettings);
     $('#sakt-save-ai', root).addEventListener('click', saveAiSettings);
@@ -1601,11 +1713,29 @@
       saveConfig();
       setExamStatus(CFG.examAutoSubmit ? '答完试卷后会自动点提交' : '答完试卷后不自动提交');
     });
+    $('#sakt-bank-import', root).addEventListener('click', () => el.bankFile.click());
+    el.bankFile.addEventListener('change', () => {
+      importBank(el.bankFile.files && el.bankFile.files[0]);
+      el.bankFile.value = '';
+    });
+    $('#sakt-bank-clear', root).addEventListener('click', () => {
+      localStorage.removeItem(BANK_KEY);
+      bankIndex = null;
+      bankMeta = null;
+      setBankStatus('题库已清除');
+      renderBank();
+    });
+    el.bankUse.addEventListener('change', () => {
+      CFG.bankFirst = el.bankUse.checked;
+      saveConfig();
+      setBankStatus(CFG.bankFirst ? '命中题库时优先用平台答案' : '已关闭题库优先，全部交给 AI');
+    });
 
     renderActions();
     renderStatus();
     renderExamActions();
     renderExam();
+    renderBank();
   }
 
   function switchTab(name) {
@@ -1620,6 +1750,7 @@
       renderExam();
       renderExamActions();
     }
+    if (name === 'bank') renderBank();
   }
 
   function setStatus(text) {
@@ -1629,6 +1760,53 @@
 
   function setAiStatus(text) {
     if (el.aiStatus) el.aiStatus.textContent = text;
+  }
+
+  function setBankStatus(text) {
+    if (el.bankStatus) el.bankStatus.textContent = text;
+  }
+
+  function renderBank() {
+    if (!el.bankInfo) return;
+    if (!loadBank()) {
+      el.bankInfo.textContent = '未导入';
+      return;
+    }
+    const meta = bankMeta || {};
+    const stems = meta.stems || (bankIndex ? bankIndex.size : 0);
+    const variants = meta.variants || 0;
+    el.bankInfo.textContent = `${stems} 题 · ${variants} 条`;
+  }
+
+  function importBank(file) {
+    if (!file) return;
+    setBankStatus('读取中…');
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || ''));
+        if (!data || !Array.isArray(data.questions) || !data.questions.length) {
+          throw new Error('缺少 questions 数组');
+        }
+        if (data.questions.length > 20000) throw new Error('题目数量异常');
+        const raw = JSON.stringify(data);
+        if (raw.length > 4 * 1024 * 1024) throw new Error('文件过大（>4MB）');
+        try {
+          localStorage.setItem(BANK_KEY, raw);
+        } catch (e) {
+          throw new Error('本地存储空间不足，请先清除旧题库');
+        }
+        bankIndex = null;
+        bankMeta = null;
+        const stems = data.meta && data.meta.stems ? data.meta.stems : data.questions.length;
+        setBankStatus(`已导入 ${data.questions.length} 条 / ${stems} 个题干`);
+        renderBank();
+      } catch (e) {
+        setBankStatus('导入失败：' + e.message);
+      }
+    };
+    reader.onerror = () => setBankStatus('读取文件失败');
+    reader.readAsText(file);
   }
 
   function saveSettings() {
@@ -1768,6 +1946,9 @@
   W.__saktExamRead = readExamQuestion;
   W.__saktExamStart = startExam;
   W.__saktExamStop = stopExam;
+  W.__saktBank = bankAnswer;
+  W.__saktNormStem = normStem;
+  W.__saktNormText = normText;
 
   (async () => {
     buildPanel();
