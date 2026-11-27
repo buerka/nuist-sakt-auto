@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.4.0
+// @version      1.5.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时，支持 AI 答题、防挂机续播、自动切课。
 // @author       buerka
 // @license      MIT
@@ -190,6 +190,89 @@
     }
   }
 
+  function isTrueValue(v) {
+    if (v === true || v === 1) return true;
+    if (v == null || v === false || v === 0) return false;
+    return /^(true|yes|y|correct|right|正确|对|是|选|选中|√|✓)$/i.test(String(v).trim());
+  }
+
+  // 从文本里按大括号配对提取所有 JSON 对象（支持嵌套，比如 judge 里再套一层）
+  function jsonObjects(raw) {
+    const text = String(raw || '');
+    const out = [];
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== '{') continue;
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let j = i; j < text.length; j++) {
+        const ch = text[j];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (ch === '\\') esc = true;
+          else if (ch === '"') inStr = false;
+          continue;
+        }
+        if (ch === '"') inStr = true;
+        else if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            out.push(text.slice(i, j + 1));
+            break;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  // 多选题：解析 {"judge":{"A":true,"B":false,...},"answer":"AC"} 里的逐选项判断
+  function parseJudgeMap(raw, q) {
+    const candidates = jsonObjects(raw);
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      try {
+        const obj = JSON.parse(candidates[i]);
+        if (!isPlainObject(obj)) continue;
+        const map = obj.judge || obj.judges || obj['判断'] || obj['选项判断'];
+        if (!isPlainObject(map)) continue;
+        const lookup = {};
+        Object.keys(map).forEach(k => {
+          const letter = String(k).toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1);
+          if (letter) lookup[letter] = map[k];
+        });
+        // judge 必须覆盖全部选项，否则可能只是列了部分正确项，弃用
+        if (!q.options.every(o => Object.prototype.hasOwnProperty.call(lookup, o.letter))) continue;
+        const picked = q.options.filter(o => isTrueValue(lookup[o.letter])).map(o => o.letter);
+        if (picked.length) return picked;
+      } catch (e) { /* ignore */ }
+    }
+    return null;
+  }
+
+  // 互斥选项：以上都是 / 以上都不对 / 全部正确……选中它就应清掉其他项
+  function isExclusiveOption(text) {
+    const t = String(text || '').replace(/[\s，。.,、;；:：!！?？]/g, '');
+    if (t.length > 20) return false;
+    const m = t.match(/^(?:以上|上述|全部|所有)(?:选项|说法|各项|这些|内容|描述|项目|所有|全部)*(.*)$/);
+    if (!m) return false;
+    const core = m[1];
+    if (/^(?:都|均|全|全部)?(?:是|为)$/.test(core)) return true;
+    return /^(?:都|均|全|全部)?(?:是|为)?(?:正确|对|符合|包括|不是|不对|不正确|错误|错|不符合)(?:的)?(?:说法|选项|做法|描述|内容|要求|规定|规范|标准|题意)?$/.test(core);
+  }
+
+  function normalizeLetters(letters, q) {
+    const picked = letters
+      .map(l => q.options.find(o => o.letter === l))
+      .filter(Boolean);
+    const exclusive = picked.find(o => isExclusiveOption(o.text));
+    if (exclusive) return [exclusive.letter];
+    const unique = [...new Set(letters)];
+    // 单选/判断只保留一个字母，避免连点两个 radio 最后落在错误项上
+    if (!q.multi) return [unique[0]];
+    return unique.sort();
+  }
+
   function parseAiAnswer(text, q) {
     const raw = String(text || '').trim();
     if (!raw) return [];
@@ -197,7 +280,7 @@
     const dedupe = arr => [...new Set(arr)].filter(l => valid.has(l));
 
     // 1) JSON 输出：模型可能先分析再给答案，所以从后往前找最后一个合法 JSON
-    const candidates = raw.match(/\{[\s\S]{0,500}?\}/g) || [];
+    const candidates = jsonObjects(raw);
     for (let i = candidates.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(candidates[i]);
@@ -262,8 +345,8 @@
   }
 
   function cacheKey(q) {
-    // 题干 + 选项文本一起做 key：选项顺序/内容变了就重新问，避免旧答案套到新题上
-    return q.stem + '||' + q.options.map(o => o.text).join('||');
+    // 题干 + 选项文本一起做 key：选项变了就重新问；v2 前缀让旧版遗留答案失效
+    return 'v2|' + q.stem + '||' + q.options.map(o => o.text).join('||');
   }
 
   function readAiCache(key) {
@@ -292,12 +375,13 @@
   function buildQuizMessages(q) {
     const options = q.options.map(o => o.letter + '. ' + o.text).join('\n');
     const lesson = pageLessonName();
+    const multi = !!q.multi;
     const lines = [];
     if (lesson) lines.push('课程：' + lesson);
     lines.push('题型：' + (q.kindText || '未知'));
     lines.push('题目：' + q.stem);
     lines.push('选项：\n' + options);
-    lines.push('请先逐项简要判断（两三句即可），最后单独一行输出 JSON 答案：');
+    lines.push(multi ? '请逐个选项判断（每个选项都要给结论），最后单独一行输出 JSON：' : '请先逐项简要判断（两三句即可），最后单独一行输出 JSON 答案：');
     return [
       {
         role: 'system',
@@ -307,7 +391,9 @@
           '1. 逐项判断每个选项；题目情境不明确时，选最安全、最规范、最保守的做法。',
           '2. 注意绝对化表述（必须/严禁/所有/任何/一律）在判断题里常是陷阱；遇到「以上都对/以上都不对」要先验证其他选项。',
           '3. 多选题必须选出全部正确项，不漏选、不多选；单选题只选一个。',
-          '4. 最后一行只输出 JSON，如 {"answer":"A"}；多选题如 {"answer":"AC"}。'
+          multi
+            ? '4. 这是多选题：逐个选项独立判断，不要因为已选中两项就停止；最后一行只输出 JSON，如 {"judge":{"A":true,"B":false,"C":true,"D":false},"answer":"AC"}，judge 必须覆盖全部选项。'
+            : '4. 最后一行只输出 JSON，如 {"answer":"A"}；判断题输出正确/错误对应的字母。'
         ].join('\n')
       },
       { role: 'user', content: lines.join('\n') }
@@ -325,18 +411,36 @@
       // 部分思考模型会把内容放在 reasoning_content，content 为空
       const content = String(message.content || message.reasoning_content || '').trim();
       if (!content) throw new Error('AI 返回为空');
-      const letters = parseAiAnswer(content, q);
+      // 多选题优先用逐选项判断，缺失时再退回 answer 字段
+      const judge = q.multi ? parseJudgeMap(content, q) : null;
+      const letters = judge || parseAiAnswer(content, q);
       if (!letters.length) {
         const cut = choice.finish_reason === 'length' ? '；输出被截断，请调大「最大 tokens」' : '';
         throw new Error('无法解析选项：' + content.slice(0, 40) + cut);
       }
-      return { letters, raw: content };
+      return { letters, judge, raw: content };
     });
   }
 
-  function voteLetters(results, total) {
+  function voteLetters(results, total, q) {
     const sets = results.map(r => r.letters);
     if (!sets.length) return { letters: [], agree: 0, total };
+
+    // 多选题：合并逐选项判断。每个样本对 A/B/C/D 都投了票，比只合并最终答案更不容易漏选
+    if (q && q.multi) {
+      const judged = results.filter(r => Array.isArray(r.judge) && r.judge.length);
+      if (judged.length >= 2) {
+        const counts = {};
+        judged.forEach(r => r.judge.forEach(l => { counts[l] = (counts[l] || 0) + 1; }));
+        const need = Math.floor(judged.length / 2) + 1;
+        const letters = q.options.map(o => o.letter).filter(l => (counts[l] || 0) >= need);
+        if (letters.length) {
+          const agree = Math.min(...letters.map(l => counts[l]));
+          return { letters, agree, total, counts };
+        }
+      }
+    }
+
     const counts = new Map();
     sets.forEach(s => {
       const k = s.join('');
@@ -348,14 +452,14 @@
       return { letters: ranked[0][0].split(''), agree: ranked[0][1], total };
     }
     if (sets.length === 1) return { letters: sets[0].slice(), agree: 1, total };
-    // 多选时几次结果可能只差一项：逐字母过半
+    // 几次结果只差一项：逐字母过半
     const letterCount = {};
     sets.forEach(s => s.forEach(l => { letterCount[l] = (letterCount[l] || 0) + 1; }));
-    const need = Math.ceil(sets.length / 2);
+    const need = Math.floor(sets.length / 2) + 1;
     const letters = Object.keys(letterCount).filter(l => letterCount[l] >= need).sort();
     if (letters.length) {
-      const agree = sets.filter(s => s.length === letters.length && letters.every(l => s.includes(l))).length;
-      return { letters, agree, total };
+      const agree = Math.min(...letters.map(l => letterCount[l]));
+      return { letters, agree, total, counts: letterCount };
     }
     return { letters: ranked[0][0].split(''), agree: ranked[0][1], total };
   }
@@ -383,12 +487,13 @@
       throw new Error(first ? first.reason.message : 'AI 请求失败');
     }
 
-    const { letters, agree, total } = voteLetters(ok, n);
+    const { letters, agree, total, counts } = voteLetters(ok, n, q);
     if (!letters.length) throw new Error('没有可用答案');
-    const winner = ok.find(r => r.letters.join('') === letters.join('')) || ok[0];
+    const finalLetters = normalizeLetters(letters, q);
+    const winner = ok.find(r => r.letters.join('') === finalLetters.join('')) || ok[0];
     const votes = `${agree}/${total}`;
-    writeAiCache(key, letters, votes);
-    return { letters, raw: winner.raw, votes };
+    writeAiCache(key, finalLetters, votes);
+    return { letters: finalLetters, raw: winner.raw, votes, counts };
   }
 
   // ---------------- 弹窗习题 ----------------
@@ -409,7 +514,9 @@
       options.push({ letter, text });
     });
 
-    return { kindText, stem, options };
+    // DOM 里出现 checkbox 就按多选处理；再兜底看题型文字
+    const multi = m.querySelectorAll('.ant-checkbox-wrapper').length > 0 || /多选|多项/.test(kindText);
+    return { kindText, stem, options, multi };
   }
 
   function isChecked(node) {
@@ -418,12 +525,19 @@
 
   function chooseOptions(m, letters) {
     const wanted = new Set(letters);
+    const multi = !!m.querySelector('.ant-checkbox-wrapper');
     m.querySelectorAll('.ant-radio-wrapper, .ant-checkbox-wrapper').forEach((node, index) => {
       const letterEl = node.querySelector('.letter');
       const letter = letterEl
         ? (letterEl.innerText || '').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1)
         : ('ABCD'[index] || '');
-      if (wanted.has(letter) && !isChecked(node)) node.click();
+      const checked = isChecked(node);
+      if (wanted.has(letter)) {
+        if (!checked) node.click();
+      } else if (multi && checked) {
+        // 多选题里上一轮误选的项要取消，避免和本轮答案混在一起
+        node.click();
+      }
     });
   }
 
@@ -456,6 +570,7 @@
       let aiError = '';
       let aiRaw = '';
       let aiVotes = '';
+      let aiJudge = '';
 
       if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
         try {
@@ -463,6 +578,9 @@
           letters = result.letters;
           aiRaw = result.raw;
           aiVotes = result.votes;
+          if (q.multi && result.counts) {
+            aiJudge = q.options.map(o => o.letter + (result.counts[o.letter] || 0)).join(' ');
+          }
           source = 'ai';
           setAiStatus(`AI ${aiVotes} → ${letters.join('')}｜${String(aiRaw).replace(/\s+/g, ' ').slice(0, 30)}`);
         } catch (e) {
@@ -488,6 +606,7 @@
         picked: letters,
         source,
         aiVotes,
+        aiJudge,
         aiError,
         aiRaw: aiRaw.slice(0, 200)
       });
