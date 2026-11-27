@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.6.0
+// @version      1.7.0
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时、AI 答题、考试页自动作答。
 // @author       buerka
 // @license      MIT
@@ -45,7 +45,7 @@
     aiModel: '',
     aiTimeout: 30000,
     aiMaxTokens: 1024,
-    aiVotes: 3,
+    aiVotes: 2,
     aiExtra: '',
     examAutoSubmit: false
   };
@@ -179,6 +179,11 @@
 
   function isPlainObject(v) {
     return !!v && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  function isReasonerModel() {
+    // deepseek-reasoner / *-thinking / o1 这类模型不接受 temperature，省略用默认值
+    return /reasoner|thinking|(^|[-_/])r1([-_/]|$)|(^|[-_/])o[134]([-_/]|$)/i.test(String(CFG.aiModel || ''));
   }
 
   function aiExtraParams() {
@@ -347,8 +352,9 @@
   }
 
   function cacheKey(q) {
-    // 题干 + 选项文本一起做 key：选项变了就重新问；v2 前缀让旧版遗留答案失效
-    return 'v2|' + q.stem + '||' + q.options.map(o => o.text).join('||');
+    // 接口 + 模型 + 题干 + 选项一起做 key：换模型/改选项后不会复用旧答案
+    return 'v3|' + String(CFG.aiBaseUrl || '') + '|' + String(CFG.aiModel || '') + '|'
+      + q.stem + '||' + q.options.map(o => o.text).join('||');
   }
 
   function readAiCache(key) {
@@ -393,9 +399,10 @@
           '1. 逐项判断每个选项；题目情境不明确时，选最安全、最规范、最保守的做法。',
           '2. 注意绝对化表述（必须/严禁/所有/任何/一律）在判断题里常是陷阱；遇到「以上都对/以上都不对」要先验证其他选项。',
           '3. 多选题必须选出全部正确项，不漏选、不多选；单选题只选一个。',
+          '4. 注意否定问法（错误、不正确、不属于、不包括、除外）：要选的是不符合的选项，不要答成正确项。',
           multi
-            ? '4. 这是多选题：逐个选项独立判断，不要因为已选中两项就停止；最后一行只输出 JSON，如 {"judge":{"A":true,"B":false,"C":true,"D":false},"answer":"AC"}，judge 必须覆盖全部选项。'
-            : '4. 最后一行只输出 JSON，如 {"answer":"A"}；判断题输出正确/错误对应的字母。'
+            ? '5. 这是多选题：逐个选项独立判断，不要因为已选中两项就停止；最后一行只输出 JSON，如 {"judge":{"A":true,"B":false,"C":true,"D":false},"answer":"AC"}。judge 表示「该选项是否应被选中」（否定问法里，应选中的是错误项），必须覆盖全部选项。'
+            : '5. 最后一行只输出 JSON，如 {"answer":"A"}；判断题输出正确/错误对应的字母。'
         ].join('\n')
       },
       { role: 'user', content: lines.join('\n') }
@@ -420,7 +427,11 @@
         const cut = choice.finish_reason === 'length' ? '；输出被截断，请调大「最大 tokens」' : '';
         throw new Error('无法解析选项：' + content.slice(0, 40) + cut);
       }
-      return { letters, judge, raw: content };
+      const usage = resp.usage || {};
+      const cacheHit = Number(usage.prompt_cache_hit_tokens
+        || (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens)
+        || 0) || 0;
+      return { letters, judge, raw: content, cacheHit };
     });
   }
 
@@ -471,17 +482,21 @@
     const cached = readAiCache(key);
     if (cached) return { letters: cached.letters, raw: '(缓存)', votes: cached.votes };
 
-    const n = Math.max(1, Math.min(5, Number(CFG.aiVotes) || 1));
+    const requested = Math.max(1, Math.min(5, Number(CFG.aiVotes) || 1));
+    // 2 = 自适应：先并发问 2 次，一致直接用，不一致再补第 3 次
+    const firstCount = requested === 2 ? 2 : requested;
     const maxTokens = Math.max(64, Math.min(8192, Number(CFG.aiMaxTokens) || 1024));
+    const base = { max_tokens: maxTokens };
+    if (!isReasonerModel()) base.temperature = requested > 1 ? 0.7 : 0;
     const payload = Object.assign(
       {},
-      { temperature: n > 1 ? 0.7 : 0, max_tokens: maxTokens },
+      base,
       aiExtraParams(),
       { model: CFG.aiModel, messages: buildQuizMessages(q) }
     );
 
     const settled = await Promise.allSettled(
-      Array.from({ length: n }, () => askOnce(q, payload))
+      Array.from({ length: firstCount }, () => askOnce(q, payload))
     );
     const ok = settled.filter(r => r.status === 'fulfilled').map(r => r.value);
     if (!ok.length) {
@@ -489,13 +504,23 @@
       throw new Error(first ? first.reason.message : 'AI 请求失败');
     }
 
-    const { letters, agree, total, counts } = voteLetters(ok, n, q);
+    let calls = firstCount;
+    const disagree = ok.length < 2 || ok[0].letters.join('') !== ok[1].letters.join('');
+    if (requested === 2 && disagree) {
+      try {
+        ok.push(await askOnce(q, payload));
+        calls = 3;
+      } catch (e) { /* 第 3 次失败就按前两次算 */ }
+    }
+
+    const { letters, agree, total, counts } = voteLetters(ok, calls, q);
     if (!letters.length) throw new Error('没有可用答案');
     const finalLetters = normalizeLetters(letters, q);
     const winner = ok.find(r => r.letters.join('') === finalLetters.join('')) || ok[0];
     const votes = `${agree}/${total}`;
+    const cacheHit = ok.reduce((sum, r) => sum + (r.cacheHit || 0), 0);
     writeAiCache(key, finalLetters, votes);
-    return { letters: finalLetters, raw: winner.raw, votes, counts };
+    return { letters: finalLetters, raw: winner.raw, votes, counts, cacheHit };
   }
 
   // ---------------- 弹窗习题 ----------------
@@ -573,6 +598,7 @@
       let aiRaw = '';
       let aiVotes = '';
       let aiJudge = '';
+      let aiCacheHit = 0;
 
       if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
         try {
@@ -580,6 +606,7 @@
           letters = result.letters;
           aiRaw = result.raw;
           aiVotes = result.votes;
+          aiCacheHit = result.cacheHit || 0;
           if (q.multi && result.counts) {
             aiJudge = q.options.map(o => o.letter + (result.counts[o.letter] || 0)).join(' ');
           }
@@ -609,6 +636,7 @@
         source,
         aiVotes,
         aiJudge,
+        aiCacheHit,
         aiError,
         aiRaw: aiRaw.slice(0, 200)
       });
@@ -1048,11 +1076,13 @@
         let source = 'default';
         let votes = '';
         let err = '';
+        let cacheHit = 0;
         if (CFG.useAI && CFG.aiBaseUrl && CFG.aiModel) {
           try {
             const r = await aiAnswer(q);
             letters = r.letters;
             votes = r.votes;
+            cacheHit = r.cacheHit || 0;
             source = 'ai';
           } catch (e) {
             err = e.message;
@@ -1077,6 +1107,7 @@
           picked,
           source,
           votes,
+          cacheHit,
           err
         });
         const tag = source === 'ai' ? `AI ${votes}` : '默认';
@@ -1482,7 +1513,8 @@
         <label class="sakt-field"><span>投票次数</span>
           <select id="sakt-votes">
             <option value="1">1 次（快）</option>
-            <option value="3">3 次（准）</option>
+            <option value="2">2+1 次（推荐）</option>
+            <option value="3">3 次（固定）</option>
             <option value="5">5 次（最准）</option>
           </select>
         </label>
@@ -1493,7 +1525,7 @@
           <button class="sakt-btn ghost" id="sakt-clear-cache">清空缓存</button>
         </div>
         <div class="sakt-status" id="sakt-ai-status"></div>
-        <div class="sakt-hint">OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等均可）。Key 只存在本机 localStorage。开思考模式请把「最大 tokens」调到 1024 以上；不同厂商的思考/联网参数可写在「额外参数」里，脚本原样透传。</div>
+        <div class="sakt-hint">OpenAI 兼容接口（DeepSeek、通义千问、Kimi 等均可）。Key 只存在本机 localStorage。开思考模式请把「最大 tokens」调到 1024 以上；不同厂商的思考/联网参数可写在「额外参数」里，脚本原样透传。投票「2+1」= 先并发问 2 次，答案一致直接用，不一致再补第 3 次；命中本地缓存时 0 次请求。</div>
       </div>
       <div class="sakt-page" data-page="exam">
         <div class="sakt-row"><span class="sakt-muted">试卷</span><span class="sakt-value" id="sakt-exam-title">-</span></div>
@@ -1625,7 +1657,7 @@
     const mt = Number(el.maxtokens.value);
     CFG.aiMaxTokens = Number.isFinite(mt) && mt >= 64 && mt <= 8192 ? Math.round(mt) : DEFAULTS.aiMaxTokens;
     const v = Number(el.votes.value);
-    CFG.aiVotes = [1, 3, 5].includes(v) ? v : DEFAULTS.aiVotes;
+    CFG.aiVotes = [1, 2, 3, 5].includes(v) ? v : DEFAULTS.aiVotes;
     CFG.aiExtra = el.extra.value.trim();
     saveConfig();
 
@@ -1650,9 +1682,11 @@
     const started = Date.now();
     try {
       const maxTokens = Math.max(256, Math.min(2048, Number(CFG.aiMaxTokens) || 1024));
+      const base = { max_tokens: maxTokens };
+      if (!isReasonerModel()) base.temperature = 0;
       const resp = await aiRequest(Object.assign(
         {},
-        { temperature: 0, max_tokens: maxTokens },
+        base,
         aiExtraParams(),
         { model: CFG.aiModel, messages: [{ role: 'user', content: '请只输出数字 1' }] }
       ));
@@ -1663,9 +1697,14 @@
       const message = choice && choice.message;
       if (!message) throw new Error('返回结构异常：' + JSON.stringify(resp).slice(0, 80));
       const text = String(message.content || message.reasoning_content || '').trim();
-      const usage = resp.usage && resp.usage.total_tokens ? `，${resp.usage.total_tokens} tokens` : '';
+      const u = resp.usage || {};
+      const usage = u.total_tokens ? `，${u.total_tokens} tokens` : '';
+      const cached = Number(u.prompt_cache_hit_tokens
+        || (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens)
+        || 0) || 0;
+      const cacheText = cached ? `，缓存命中 ${cached} tokens` : '';
       const cut = choice.finish_reason === 'length' ? '（输出被截断，请调大「最大 tokens」）' : '';
-      setAiStatus(`模型已回复（${Date.now() - started}ms${usage}）：「${text || '(空)'}」${cut}`);
+      setAiStatus(`模型已回复（${Date.now() - started}ms${usage}${cacheText}）：「${text || '(空)'}」${cut}`);
     } catch (e) {
       setAiStatus('失败：' + e.message);
     }
