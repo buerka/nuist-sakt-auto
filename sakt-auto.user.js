@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         南信大（NUIST）实验室安全平台 · 自动连续学习
 // @namespace    https://github.com/buerka/nuist-sakt-auto
-// @version      1.9.0
+// @version      1.9.1
 // @description  南京信息工程大学（NUIST）实验室安全准入与教育平台：自动逐节播放未学课时、AI 答题、考试页自动作答。
 // @author       buerka
 // @license      MIT
@@ -674,9 +674,12 @@
 
     const options = [];
     m.querySelectorAll('.ant-radio-wrapper, .ant-checkbox-wrapper').forEach(node => {
+      const input = node.querySelector('input');
       const letterEl = node.querySelector('.letter');
       const letterText = letterEl ? (letterEl.innerText || '').trim() : '';
-      let letter = letterText.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1);
+      // input.value 才是 Vue 绑定的真实选项字母；.letter 只是部分题型才有的展示元素
+      let letter = String((input && input.value) || '').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1);
+      if (!letter) letter = letterText.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1);
       if (!letter) letter = 'ABCD'[options.length] || '';
       const full = (node.innerText || '').replace(/\s+/g, ' ').trim();
       const text = letterText ? full.replace(letterText.replace(/\s+/g, ' '), '').trim() : full;
@@ -692,22 +695,49 @@
     return /-checked/.test(node.className) || !!node.querySelector('.ant-checkbox-checked, .ant-radio-checked');
   }
 
-  function chooseOptions(m, letters) {
+  function quizLetter(node, index) {
+    const input = node.querySelector('input');
+    let letter = String((input && input.value) || '').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1);
+    if (!letter) {
+      const letterEl = node.querySelector('.letter');
+      letter = letterEl ? (letterEl.innerText || '').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1) : '';
+    }
+    return letter || ('ABCD'[index] || '');
+  }
+
+  async function chooseOptions(m, letters) {
     const wanted = new Set(letters);
     const multi = !!m.querySelector('.ant-checkbox-wrapper');
-    m.querySelectorAll('.ant-radio-wrapper, .ant-checkbox-wrapper').forEach((node, index) => {
-      const letterEl = node.querySelector('.letter');
-      const letter = letterEl
-        ? (letterEl.innerText || '').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 1)
-        : ('ABCD'[index] || '');
-      const checked = isChecked(node);
-      if (wanted.has(letter)) {
-        if (!checked) node.click();
-      } else if (multi && checked) {
-        // 多选题里上一轮误选的项要取消，避免和本轮答案混在一起
-        node.click();
+    const wrappers = () => [...m.querySelectorAll('.ant-radio-wrapper, .ant-checkbox-wrapper')];
+    const find = letter => wrappers().find((node, index) => quizLetter(node, index) === letter);
+
+    // 弹题是受控组件：连着同步点会各自从同一份旧值计算，最后只留下最后一次点击。
+    // 所以必须逐项点击、等 Vue 渲染完、确认真的勾上再点下一项。
+    if (multi) {
+      const extras = wrappers()
+        .map((node, index) => ({ letter: quizLetter(node, index), checked: isChecked(node) }))
+        .filter(x => x.checked && !wanted.has(x.letter));
+      for (const x of extras) {
+        const fresh = find(x.letter);
+        if (fresh && isChecked(fresh)) fresh.click();
+        await sleep(120);
       }
-    });
+    }
+
+    for (const letter of letters) {
+      let ok = false;
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        const node = find(letter);
+        if (!node) break;
+        if (isChecked(node)) { ok = true; break; }
+        node.click();
+        for (let k = 0; k < 8; k++) {
+          await sleep(60);
+          const cur = find(letter);
+          if (cur && isChecked(cur)) { ok = true; break; }
+        }
+      }
+    }
   }
 
   function logQuiz(entry) {
@@ -770,8 +800,8 @@
         source = 'default';
       }
 
-      chooseOptions(m, letters);
-      await sleep(200);
+      await chooseOptions(m, letters);
+      await sleep(250);
       const btn = [...m.querySelectorAll('button')].find(b => (b.innerText || '').replace(/\s+/g, '').includes('提交'));
       if (btn && !btn.disabled) btn.click();
 
